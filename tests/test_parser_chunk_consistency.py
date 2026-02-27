@@ -4,7 +4,7 @@ import re
 import pytest
 import tempfile
 from pathlib import Path
-from ieeA.parser.latex_parser import LaTeXParser
+from arxiv_translate.parser.latex_parser import LaTeXParser
 
 
 class TestParserChunkConsistency:

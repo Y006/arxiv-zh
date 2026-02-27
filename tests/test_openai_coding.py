@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 # ---------------------------------------------------------------------------
 def test_config_accepts_openai_coding():
     """LLMConfig(sdk='openai-coding') should succeed without error."""
-    from ieeA.rules.config import LLMConfig
+    from arxiv_translate.rules.config import LLMConfig
 
     cfg = LLMConfig(sdk="openai-coding")
     assert cfg.sdk == "openai-coding"
@@ -35,7 +35,7 @@ def test_config_accepts_openai_coding():
 # ---------------------------------------------------------------------------
 def test_config_rejects_invalid_sdk():
     """LLMConfig(sdk='invalid') should raise ValueError."""
-    from ieeA.rules.config import LLMConfig
+    from arxiv_translate.rules.config import LLMConfig
 
     with pytest.raises(ValueError, match="sdk must be"):
         LLMConfig(sdk="invalid")
@@ -46,8 +46,8 @@ def test_config_rejects_invalid_sdk():
 # ---------------------------------------------------------------------------
 def test_factory_returns_correct_type():
     """get_sdk_client('openai-coding', ...) returns OpenAICodingProvider."""
-    from ieeA.translator import get_sdk_client
-    from ieeA.translator.openai_coding_provider import OpenAICodingProvider
+    from arxiv_translate.translator import get_sdk_client
+    from arxiv_translate.translator.openai_coding_provider import OpenAICodingProvider
 
     provider = get_sdk_client("openai-coding", model="gpt-4o", key="test-key")
     assert isinstance(provider, OpenAICodingProvider)
@@ -58,7 +58,7 @@ def test_factory_returns_correct_type():
 # ---------------------------------------------------------------------------
 async def test_history_accumulates(mock_openai_response):
     """3 translate calls should produce 6 history entries (3 user + 3 assistant)."""
-    from ieeA.translator.openai_coding_provider import OpenAICodingProvider
+    from arxiv_translate.translator.openai_coding_provider import OpenAICodingProvider
 
     provider = OpenAICodingProvider(model="gpt-4o", api_key="test")
     provider.client.chat.completions.create = AsyncMock(
@@ -81,8 +81,8 @@ async def test_history_accumulates(mock_openai_response):
 # ---------------------------------------------------------------------------
 async def test_sequential_execution(mock_openai_response):
     """Verify chunks are translated sequentially, not concurrently."""
-    from ieeA.translator.openai_coding_provider import OpenAICodingProvider
-    from ieeA.translator.pipeline import TranslationPipeline
+    from arxiv_translate.translator.openai_coding_provider import OpenAICodingProvider
+    from arxiv_translate.translator.pipeline import TranslationPipeline
 
     timestamps: list = []
 
@@ -132,7 +132,7 @@ async def test_sequential_execution(mock_openai_response):
 # ---------------------------------------------------------------------------
 def test_system_prompt_contains_consistency():
     """build_system_prompt(coding_mode=True) must contain consistency rule."""
-    from ieeA.translator.prompts import build_system_prompt
+    from arxiv_translate.translator.prompts import build_system_prompt
 
     prompt = build_system_prompt(coding_mode=True)
     assert "保持专业名词一致性" in prompt
@@ -143,8 +143,8 @@ def test_system_prompt_contains_consistency():
 # ---------------------------------------------------------------------------
 async def test_state_file_includes_history(mock_openai_response, tmp_path):
     """After sequential translate, saved state JSON must contain message_history."""
-    from ieeA.translator.openai_coding_provider import OpenAICodingProvider
-    from ieeA.translator.pipeline import TranslationPipeline
+    from arxiv_translate.translator.openai_coding_provider import OpenAICodingProvider
+    from arxiv_translate.translator.pipeline import TranslationPipeline
 
     provider = OpenAICodingProvider(model="gpt-4o", api_key="test")
     provider.client.chat.completions.create = AsyncMock(
@@ -176,8 +176,8 @@ async def test_state_file_includes_history(mock_openai_response, tmp_path):
 # ---------------------------------------------------------------------------
 async def test_resume_restores_history(mock_openai_response, tmp_path):
     """Loading state with message_history should restore provider history."""
-    from ieeA.translator.openai_coding_provider import OpenAICodingProvider
-    from ieeA.translator.pipeline import TranslationPipeline
+    from arxiv_translate.translator.openai_coding_provider import OpenAICodingProvider
+    from arxiv_translate.translator.pipeline import TranslationPipeline
 
     # Prepare state file with pre-existing history
     history = [
@@ -231,7 +231,7 @@ async def test_resume_restores_history(mock_openai_response, tmp_path):
 # ---------------------------------------------------------------------------
 async def test_retry_no_history_corruption(mock_openai_response):
     """Failed API calls should NOT add entries to message_history."""
-    from ieeA.translator.openai_coding_provider import OpenAICodingProvider
+    from arxiv_translate.translator.openai_coding_provider import OpenAICodingProvider
 
     provider = OpenAICodingProvider(model="gpt-4o", api_key="test")
 
@@ -267,7 +267,7 @@ async def test_retry_no_history_corruption(mock_openai_response):
 # ---------------------------------------------------------------------------
 async def test_ping_no_history_pollution(mock_openai_response):
     """ping() must NOT modify message_history."""
-    from ieeA.translator.openai_coding_provider import OpenAICodingProvider
+    from arxiv_translate.translator.openai_coding_provider import OpenAICodingProvider
 
     provider = OpenAICodingProvider(model="gpt-4o", api_key="test")
     provider.client.chat.completions.create = AsyncMock(
@@ -284,7 +284,7 @@ async def test_ping_no_history_pollution(mock_openai_response):
 # ---------------------------------------------------------------------------
 def test_endpoint_normalization():
     """get_sdk_client should strip '/chat/completions' from endpoint."""
-    from ieeA.translator import get_sdk_client
+    from arxiv_translate.translator import get_sdk_client
 
     provider = get_sdk_client(
         "openai-coding",
@@ -302,7 +302,7 @@ def test_endpoint_normalization():
 # ---------------------------------------------------------------------------
 async def test_few_shot_always_injected(mock_openai_response):
     """Verify few-shot examples are injected in EVERY request, not just the first."""
-    from ieeA.translator.openai_coding_provider import OpenAICodingProvider
+    from arxiv_translate.translator.openai_coding_provider import OpenAICodingProvider
 
     provider = OpenAICodingProvider(model="gpt-4o", api_key="test")
     provider.client.chat.completions.create = AsyncMock(
@@ -340,7 +340,7 @@ async def test_few_shot_always_injected(mock_openai_response):
 # ---------------------------------------------------------------------------
 async def test_full_glossary_not_filtered(mock_openai_response, sample_glossary):
     """System prompt should contain ALL glossary terms, not filtered by chunk content."""
-    from ieeA.translator.openai_coding_provider import OpenAICodingProvider
+    from arxiv_translate.translator.openai_coding_provider import OpenAICodingProvider
 
     # Chunk text only mentions "Transformer" but NOT "Attention" or "BERT"
     provider = OpenAICodingProvider(

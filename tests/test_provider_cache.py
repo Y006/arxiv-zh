@@ -11,7 +11,7 @@ class TestOpenAIProviderCache:
 
     async def test_bypass_uses_prebuilt_prompt(self):
         """When _prebuilt_system_prompt is set, it should be used directly."""
-        with patch("ieeA.translator.openai_provider.openai") as mock_openai:
+        with patch("arxiv_translate.translator.openai_provider.openai") as mock_openai:
             mock_client = MagicMock()
             mock_response = MagicMock()
             mock_response.choices = [MagicMock()]
@@ -20,7 +20,7 @@ class TestOpenAIProviderCache:
             mock_openai.AsyncOpenAI.return_value = mock_client
             mock_openai.Timeout = MagicMock()
 
-            from ieeA.translator.openai_provider import OpenAIProvider
+            from arxiv_translate.translator.openai_provider import OpenAIProvider
 
             provider = OpenAIProvider(model="test", api_key="test")
             provider._prebuilt_system_prompt = "FIXED_PROMPT"
@@ -33,7 +33,7 @@ class TestOpenAIProviderCache:
 
     async def test_fallback_without_prebuilt(self):
         """When _prebuilt_system_prompt is None, should use build_system_prompt."""
-        with patch("ieeA.translator.openai_provider.openai") as mock_openai:
+        with patch("arxiv_translate.translator.openai_provider.openai") as mock_openai:
             mock_client = MagicMock()
             mock_response = MagicMock()
             mock_response.choices = [MagicMock()]
@@ -42,7 +42,7 @@ class TestOpenAIProviderCache:
             mock_openai.AsyncOpenAI.return_value = mock_client
             mock_openai.Timeout = MagicMock()
 
-            from ieeA.translator.openai_provider import OpenAIProvider
+            from arxiv_translate.translator.openai_provider import OpenAIProvider
 
             provider = OpenAIProvider(model="test", api_key="test")
 
@@ -54,7 +54,7 @@ class TestOpenAIProviderCache:
 
     async def test_prebuilt_ignored_when_glossary_hints_provided(self):
         """When glossary_hints is provided, prebuilt prompt should NOT be used."""
-        with patch("ieeA.translator.openai_provider.openai") as mock_openai:
+        with patch("arxiv_translate.translator.openai_provider.openai") as mock_openai:
             mock_client = MagicMock()
             mock_response = MagicMock()
             mock_response.choices = [MagicMock()]
@@ -63,7 +63,7 @@ class TestOpenAIProviderCache:
             mock_openai.AsyncOpenAI.return_value = mock_client
             mock_openai.Timeout = MagicMock()
 
-            from ieeA.translator.openai_provider import OpenAIProvider
+            from arxiv_translate.translator.openai_provider import OpenAIProvider
 
             provider = OpenAIProvider(model="test", api_key="test")
             provider._prebuilt_system_prompt = "FIXED_PROMPT"
@@ -82,7 +82,7 @@ class TestAnthropicProviderCache:
 
     async def test_system_blocks_format(self):
         """When prebuilt prompt is set, system should be a list with cache_control."""
-        with patch("ieeA.translator.anthropic_provider.anthropic") as mock_anthropic:
+        with patch("arxiv_translate.translator.anthropic_provider.anthropic") as mock_anthropic:
             mock_anthropic.AsyncAnthropic = MagicMock
             mock_client = MagicMock()
             mock_response = MagicMock()
@@ -92,7 +92,7 @@ class TestAnthropicProviderCache:
             mock_response.content = [mock_block]
             mock_client.messages.create = AsyncMock(return_value=mock_response)
 
-            from ieeA.translator.anthropic_provider import AnthropicProvider
+            from arxiv_translate.translator.anthropic_provider import AnthropicProvider
 
             provider = AnthropicProvider.__new__(AnthropicProvider)
             provider.model = "claude-3-5-sonnet"
@@ -112,7 +112,7 @@ class TestAnthropicProviderCache:
 
     async def test_fallback_to_string(self):
         """When no prebuilt prompt, system should be a string."""
-        with patch("ieeA.translator.anthropic_provider.anthropic") as mock_anthropic:
+        with patch("arxiv_translate.translator.anthropic_provider.anthropic") as mock_anthropic:
             mock_anthropic.AsyncAnthropic = MagicMock
             mock_client = MagicMock()
             mock_response = MagicMock()
@@ -122,7 +122,7 @@ class TestAnthropicProviderCache:
             mock_response.content = [mock_block]
             mock_client.messages.create = AsyncMock(return_value=mock_response)
 
-            from ieeA.translator.anthropic_provider import AnthropicProvider
+            from arxiv_translate.translator.anthropic_provider import AnthropicProvider
 
             provider = AnthropicProvider.__new__(AnthropicProvider)
             provider.model = "claude-3-5-sonnet"
@@ -141,7 +141,7 @@ class TestAnthropicProviderCache:
 
     async def test_cache_control_structure(self):
         """Cache control should have exactly the right structure."""
-        with patch("ieeA.translator.anthropic_provider.anthropic") as mock_anthropic:
+        with patch("arxiv_translate.translator.anthropic_provider.anthropic") as mock_anthropic:
             mock_anthropic.AsyncAnthropic = MagicMock
             mock_client = MagicMock()
             mock_response = MagicMock()
@@ -151,7 +151,7 @@ class TestAnthropicProviderCache:
             mock_response.content = [mock_block]
             mock_client.messages.create = AsyncMock(return_value=mock_response)
 
-            from ieeA.translator.anthropic_provider import AnthropicProvider
+            from arxiv_translate.translator.anthropic_provider import AnthropicProvider
 
             provider = AnthropicProvider.__new__(AnthropicProvider)
             provider.model = "claude-3-5-sonnet"
@@ -183,12 +183,12 @@ class TestHTTPProviderCache:
         }
         mock_response.raise_for_status = MagicMock()
 
-        with patch("ieeA.translator.http_provider.httpx.AsyncClient") as mock_httpx:
+        with patch("arxiv_translate.translator.http_provider.httpx.AsyncClient") as mock_httpx:
             mock_client = MagicMock()
             mock_client.post = AsyncMock(return_value=mock_response)
             mock_httpx.return_value = mock_client
 
-            from ieeA.translator.http_provider import DirectHTTPProvider
+            from arxiv_translate.translator.http_provider import DirectHTTPProvider
 
             provider = DirectHTTPProvider(
                 model="test",
@@ -211,12 +211,12 @@ class TestHTTPProviderCache:
         }
         mock_response.raise_for_status = MagicMock()
 
-        with patch("ieeA.translator.http_provider.httpx.AsyncClient") as mock_httpx:
+        with patch("arxiv_translate.translator.http_provider.httpx.AsyncClient") as mock_httpx:
             mock_client = MagicMock()
             mock_client.post = AsyncMock(return_value=mock_response)
             mock_httpx.return_value = mock_client
 
-            from ieeA.translator.http_provider import DirectHTTPProvider
+            from arxiv_translate.translator.http_provider import DirectHTTPProvider
 
             provider = DirectHTTPProvider(
                 model="test",
@@ -236,14 +236,14 @@ class TestArkProviderCache:
 
     def test_ark_provider_extends_llmprovider(self):
         """ArkProvider should be a subclass of LLMProvider."""
-        from ieeA.translator.ark_provider import ArkProvider
-        from ieeA.translator.llm_base import LLMProvider
+        from arxiv_translate.translator.ark_provider import ArkProvider
+        from arxiv_translate.translator.llm_base import LLMProvider
 
         assert issubclass(ArkProvider, LLMProvider)
 
     def test_ark_provider_has_required_methods(self):
         """ArkProvider should have all required methods."""
-        from ieeA.translator.ark_provider import ArkProvider
+        from arxiv_translate.translator.ark_provider import ArkProvider
 
         assert hasattr(ArkProvider, "translate")
         assert hasattr(ArkProvider, "ping")
@@ -252,17 +252,17 @@ class TestArkProviderCache:
 
     def test_ark_import_error_without_sdk(self):
         """ArkProvider should raise ImportError when SDK is not installed."""
-        from ieeA.translator.ark_provider import HAS_ARK
+        from arxiv_translate.translator.ark_provider import HAS_ARK
 
         if not HAS_ARK:
-            from ieeA.translator.ark_provider import ArkProvider
+            from arxiv_translate.translator.ark_provider import ArkProvider
 
             with pytest.raises(ImportError, match="volcenginesdkarkruntime"):
                 ArkProvider(model="test")
 
     def test_ark_provider_has_prebuilt_attributes(self):
         """ArkProvider class should support prebuilt prompt attributes."""
-        from ieeA.translator.ark_provider import ArkProvider
+        from arxiv_translate.translator.ark_provider import ArkProvider
 
         # Check via __init__ source or class definition that attributes are initialized
         import inspect
@@ -274,13 +274,13 @@ class TestArkProviderCache:
     def test_ark_provider_uses_async_client(self):
         """ArkProvider must use AsyncArk, not sync Ark."""
         import inspect
-        from ieeA.translator.ark_provider import ArkProvider
+        from arxiv_translate.translator.ark_provider import ArkProvider
 
         source = inspect.getsource(ArkProvider)
         # Must NOT contain sync Ark import/usage
         assert "from volcenginesdkarkruntime import Ark " not in source
         # Module-level import should be AsyncArk
-        import ieeA.translator.ark_provider as ark_mod
+        import arxiv_translate.translator.ark_provider as ark_mod
 
         module_source = inspect.getsource(ark_mod)
         assert "AsyncArk" in module_source
@@ -289,21 +289,21 @@ class TestArkProviderCache:
     def test_ark_translate_is_truly_async(self):
         """ArkProvider.translate must be a coroutine function."""
         import asyncio
-        from ieeA.translator.ark_provider import ArkProvider
+        from arxiv_translate.translator.ark_provider import ArkProvider
 
         assert asyncio.iscoroutinefunction(ArkProvider.translate)
 
     def test_ark_setup_context_is_async(self):
         """ArkProvider.setup_context must be a coroutine function."""
         import asyncio
-        from ieeA.translator.ark_provider import ArkProvider
+        from arxiv_translate.translator.ark_provider import ArkProvider
 
         assert asyncio.iscoroutinefunction(ArkProvider.setup_context)
 
     def test_ark_ping_is_async(self):
         """ArkProvider.ping must be a coroutine function."""
         import asyncio
-        from ieeA.translator.ark_provider import ArkProvider
+        from arxiv_translate.translator.ark_provider import ArkProvider
 
         assert asyncio.iscoroutinefunction(ArkProvider.ping)
 
@@ -311,7 +311,7 @@ class TestArkProviderCache:
         """Every self.client.* call in ArkProvider must be awaited."""
         import ast
         import inspect
-        from ieeA.translator.ark_provider import ArkProvider
+        from arxiv_translate.translator.ark_provider import ArkProvider
 
         source = inspect.getsource(ArkProvider)
         tree = ast.parse(source)
@@ -358,7 +358,7 @@ class TestArkProviderCache:
 
     async def test_ark_concurrent_translate_not_serialized(self):
         """Multiple ArkProvider.translate calls via gather should run concurrently."""
-        from ieeA.translator.ark_provider import ArkProvider, HAS_ARK
+        from arxiv_translate.translator.ark_provider import ArkProvider, HAS_ARK
 
         if not HAS_ARK:
             pytest.skip("volcenginesdkarkruntime not installed")
@@ -406,7 +406,7 @@ class TestArkProviderCache:
         self, capsys
     ):
         """ArkProvider should parse cached_tokens but stay quiet by default."""
-        from ieeA.translator.ark_provider import ArkProvider
+        from arxiv_translate.translator.ark_provider import ArkProvider
 
         provider = ArkProvider.__new__(ArkProvider)
         provider.model = "test-model"
@@ -457,7 +457,7 @@ class TestArkProviderCache:
 
     async def test_ark_cache_stats_aggregate_hit_miss_and_tokens(self):
         """ArkProvider should aggregate cache hit/miss counts and token totals."""
-        from ieeA.translator.ark_provider import ArkProvider
+        from arxiv_translate.translator.ark_provider import ArkProvider
 
         provider = ArkProvider.__new__(ArkProvider)
         provider.model = "test-model"
@@ -507,7 +507,7 @@ class TestArkProviderCache:
 
     async def test_ark_cache_stats_track_missing_usage_without_polluting_totals(self):
         """Responses without usage should not affect token totals and should be counted separately."""
-        from ieeA.translator.ark_provider import ArkProvider
+        from arxiv_translate.translator.ark_provider import ArkProvider
 
         provider = ArkProvider.__new__(ArkProvider)
         provider.model = "test-model"
@@ -539,7 +539,7 @@ class TestArkProviderCache:
 
     async def test_pipeline_captures_provider_cache_meta(self):
         """Pipeline metadata should include provider_cache_meta from provider side-channel."""
-        from ieeA.translator.pipeline import TranslationPipeline
+        from arxiv_translate.translator.pipeline import TranslationPipeline
 
         provider = AsyncMock()
 
@@ -568,7 +568,7 @@ class TestArkProviderCache:
         self,
     ):
         """Batch path should use explicit prompt_variant, not swap provider shared prompt."""
-        from ieeA.translator.pipeline import TranslationPipeline
+        from arxiv_translate.translator.pipeline import TranslationPipeline
 
         provider = AsyncMock()
         provider._prebuilt_system_prompt = "INDIVIDUAL_PROMPT"
@@ -593,7 +593,7 @@ class TestArkProviderCache:
 
     async def test_pipeline_warms_required_prompt_variants_before_translation(self):
         """Pipeline should prewarm both batch and individual prompt variants when both are used."""
-        from ieeA.translator.pipeline import TranslationPipeline
+        from arxiv_translate.translator.pipeline import TranslationPipeline
 
         provider = AsyncMock()
         provider._last_cache_meta = None
@@ -626,7 +626,7 @@ class TestArkProviderCache:
 
     async def test_ark_translate_uses_variant_specific_context_id(self):
         """ArkProvider should choose context_id by prompt_variant."""
-        from ieeA.translator.ark_provider import ArkProvider
+        from arxiv_translate.translator.ark_provider import ArkProvider
 
         provider = ArkProvider.__new__(ArkProvider)
         provider.model = "test-model"
@@ -657,7 +657,7 @@ class TestArkProviderCache:
 
     async def test_ark_setup_context_caches_few_shot_prefix(self):
         """ArkProvider setup_context should cache system + few-shot messages as prefix."""
-        from ieeA.translator.ark_provider import ArkProvider
+        from arxiv_translate.translator.ark_provider import ArkProvider
 
         provider = ArkProvider.__new__(ArkProvider)
         provider.model = "test-model"
@@ -685,7 +685,7 @@ class TestArkProviderCache:
 
     async def test_ark_batch_context_rebuild_does_not_overwrite_individual_context(self):
         """Rebuilding expired batch context should keep individual context_id intact."""
-        from ieeA.translator.ark_provider import ArkProvider
+        from arxiv_translate.translator.ark_provider import ArkProvider
 
         provider = ArkProvider.__new__(ArkProvider)
         provider.model = "test-model"

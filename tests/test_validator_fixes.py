@@ -1,7 +1,7 @@
 """Tests for validator fixes - brace checking and math environment validation."""
 
 import pytest
-from ieeA.validator.rules import BuiltInRules
+from arxiv_translate.validator.rules import BuiltInRules
 
 
 class TestCheckBraces:

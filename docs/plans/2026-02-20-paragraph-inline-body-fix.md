@@ -20,7 +20,7 @@
 ```python
 """Tests for paragraph inline body text extraction."""
 
-from ieeA.parser.latex_parser import LaTeXParser
+from arxiv-translate.parser.latex_parser import LaTeXParser
 
 
 def _extract_paragraph_chunks(text: str):
@@ -108,7 +108,7 @@ git commit -m "test: 添加 \paragraph 同行正文未翻译问题的回归测�
 ## Task 2: 实现修复
 
 **Files:**
-- Modify: `src/ieeA/parser/latex_parser.py:754-757`
+- Modify: `src/arxiv_translate/parser/latex_parser.py:754-757`
 
 **Step 1: 修改代码**
 
@@ -176,13 +176,13 @@ Expected: All PASS
 **Step 1: 检查改动**
 
 ```bash
-git diff src/ieeA/parser/latex_parser.py
+git diff src/arxiv_translate/parser/latex_parser.py
 ```
 
 **Step 2: 提交修复**
 
 ```bash
-git add src/ieeA/parser/latex_parser.py
+git add src/arxiv_translate/parser/latex_parser.py
 git commit -m "修复: \paragraph 同行正文未被识别为可翻译内容的问题"
 ```
 
@@ -204,7 +204,7 @@ git commit -m "修复: \paragraph 同行正文未被识别为可翻译内容的�
 **Step 2: 使用 parser 解析并检查输出**
 
 ```python
-from ieeA.parser.latex_parser import LaTeXParser
+from arxiv-translate.parser.latex_parser import LaTeXParser
 import tempfile
 
 with tempfile.NamedTemporaryFile(mode='w', suffix='.tex', delete=False) as f:

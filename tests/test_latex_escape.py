@@ -11,7 +11,7 @@ from pathlib import Path
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from ieeA.parser.structure import escape_latex_special_chars, Chunk
+from arxiv_translate.parser.structure import escape_latex_special_chars, Chunk
 
 
 class TestBasicEscaping:

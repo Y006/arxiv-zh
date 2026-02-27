@@ -1,6 +1,6 @@
 import re
 
-from ieeA.parser.latex_parser import LaTeXParser
+from arxiv_translate.parser.latex_parser import LaTeXParser
 
 
 def test_process_body_uses_refactored_stage_order(monkeypatch):

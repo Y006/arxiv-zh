@@ -4,7 +4,7 @@ import asyncio
 import pytest
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
-from ieeA.translator.pipeline import TranslationPipeline, TranslatedChunk
+from arxiv_translate.translator.pipeline import TranslationPipeline, TranslatedChunk
 
 
 class TestGracefulSkipOnTimeout:

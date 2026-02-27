@@ -19,21 +19,21 @@ class TestBailianProviderInheritance:
 
     def test_bailian_provider_extends_openai_provider(self):
         """BailianProvider should be a subclass of OpenAIProvider."""
-        from ieeA.translator.bailian_provider import BailianProvider
-        from ieeA.translator.openai_provider import OpenAIProvider
+        from arxiv_translate.translator.bailian_provider import BailianProvider
+        from arxiv_translate.translator.openai_provider import OpenAIProvider
 
         assert issubclass(BailianProvider, OpenAIProvider)
 
     def test_bailian_provider_extends_llm_provider(self):
         """BailianProvider should ultimately extend LLMProvider."""
-        from ieeA.translator.bailian_provider import BailianProvider
-        from ieeA.translator.llm_base import LLMProvider
+        from arxiv_translate.translator.bailian_provider import BailianProvider
+        from arxiv_translate.translator.llm_base import LLMProvider
 
         assert issubclass(BailianProvider, LLMProvider)
 
     def test_bailian_provider_has_required_methods(self):
         """BailianProvider should have all required methods."""
-        from ieeA.translator.bailian_provider import BailianProvider
+        from arxiv_translate.translator.bailian_provider import BailianProvider
 
         assert hasattr(BailianProvider, "translate")
         assert hasattr(BailianProvider, "ping")
@@ -46,11 +46,11 @@ class TestBailianProviderInitialization:
 
     def test_prebuilt_prompt_attributes_initialized(self):
         """Prebuilt prompt attributes should be initialized to None."""
-        with patch("ieeA.translator.openai_provider.openai") as mock_openai:
+        with patch("arxiv_translate.translator.openai_provider.openai") as mock_openai:
             mock_openai.AsyncOpenAI = MagicMock()
             mock_openai.Timeout = MagicMock()
 
-            from ieeA.translator.bailian_provider import BailianProvider
+            from arxiv_translate.translator.bailian_provider import BailianProvider
 
             provider = BailianProvider(model="qwen-max", api_key="test-key")
 
@@ -63,7 +63,7 @@ class TestBailianProviderMessageFormat:
 
     async def test_system_message_is_array_with_cache_control(self):
         """System message should be array format with cache_control."""
-        with patch("ieeA.translator.openai_provider.openai") as mock_openai:
+        with patch("arxiv_translate.translator.openai_provider.openai") as mock_openai:
             mock_client = MagicMock()
             mock_response = MagicMock()
             mock_response.choices = [MagicMock()]
@@ -73,7 +73,7 @@ class TestBailianProviderMessageFormat:
             mock_openai.AsyncOpenAI.return_value = mock_client
             mock_openai.Timeout = MagicMock()
 
-            from ieeA.translator.bailian_provider import BailianProvider
+            from arxiv_translate.translator.bailian_provider import BailianProvider
 
             provider = BailianProvider(model="qwen-max", api_key="test-key")
             provider._prebuilt_system_prompt = "FIXED_SYSTEM_PROMPT"
@@ -92,7 +92,7 @@ class TestBailianProviderMessageFormat:
 
     async def test_system_message_cache_control_structure(self):
         """Cache control should have exactly the right structure."""
-        with patch("ieeA.translator.openai_provider.openai") as mock_openai:
+        with patch("arxiv_translate.translator.openai_provider.openai") as mock_openai:
             mock_client = MagicMock()
             mock_response = MagicMock()
             mock_response.choices = [MagicMock()]
@@ -102,7 +102,7 @@ class TestBailianProviderMessageFormat:
             mock_openai.AsyncOpenAI.return_value = mock_client
             mock_openai.Timeout = MagicMock()
 
-            from ieeA.translator.bailian_provider import BailianProvider
+            from arxiv_translate.translator.bailian_provider import BailianProvider
 
             provider = BailianProvider(model="qwen-max", api_key="test-key")
 
@@ -122,7 +122,7 @@ class TestBailianProviderMessageFormat:
 
     async def test_prebuilt_prompt_bypass(self):
         """When _prebuilt_system_prompt is set and no glossary, use it directly."""
-        with patch("ieeA.translator.openai_provider.openai") as mock_openai:
+        with patch("arxiv_translate.translator.openai_provider.openai") as mock_openai:
             mock_client = MagicMock()
             mock_response = MagicMock()
             mock_response.choices = [MagicMock()]
@@ -132,7 +132,7 @@ class TestBailianProviderMessageFormat:
             mock_openai.AsyncOpenAI.return_value = mock_client
             mock_openai.Timeout = MagicMock()
 
-            from ieeA.translator.bailian_provider import BailianProvider
+            from arxiv_translate.translator.bailian_provider import BailianProvider
 
             provider = BailianProvider(model="qwen-max", api_key="test-key")
             provider._prebuilt_system_prompt = "PREBUILT_PROMPT"
@@ -145,7 +145,7 @@ class TestBailianProviderMessageFormat:
 
     async def test_prebuilt_ignored_when_glossary_provided(self):
         """When glossary_hints is provided, prebuilt prompt should NOT be used."""
-        with patch("ieeA.translator.openai_provider.openai") as mock_openai:
+        with patch("arxiv_translate.translator.openai_provider.openai") as mock_openai:
             mock_client = MagicMock()
             mock_response = MagicMock()
             mock_response.choices = [MagicMock()]
@@ -155,7 +155,7 @@ class TestBailianProviderMessageFormat:
             mock_openai.AsyncOpenAI.return_value = mock_client
             mock_openai.Timeout = MagicMock()
 
-            from ieeA.translator.bailian_provider import BailianProvider
+            from arxiv_translate.translator.bailian_provider import BailianProvider
 
             provider = BailianProvider(model="qwen-max", api_key="test-key")
             provider._prebuilt_system_prompt = "PREBUILT_PROMPT"
@@ -170,7 +170,7 @@ class TestBailianProviderMessageFormat:
 
     async def test_few_shot_examples_in_messages(self):
         """Few-shot examples should be included in messages."""
-        with patch("ieeA.translator.openai_provider.openai") as mock_openai:
+        with patch("arxiv_translate.translator.openai_provider.openai") as mock_openai:
             mock_client = MagicMock()
             mock_response = MagicMock()
             mock_response.choices = [MagicMock()]
@@ -180,7 +180,7 @@ class TestBailianProviderMessageFormat:
             mock_openai.AsyncOpenAI.return_value = mock_client
             mock_openai.Timeout = MagicMock()
 
-            from ieeA.translator.bailian_provider import BailianProvider
+            from arxiv_translate.translator.bailian_provider import BailianProvider
 
             provider = BailianProvider(model="qwen-max", api_key="test-key")
 
@@ -207,7 +207,7 @@ class TestBailianProviderCacheMeta:
 
     def test_extract_cache_meta_with_cached_tokens(self):
         """Should correctly extract cached_tokens and cache_creation_input_tokens."""
-        from ieeA.translator.bailian_provider import BailianProvider
+        from arxiv_translate.translator.bailian_provider import BailianProvider
 
         provider = BailianProvider.__new__(BailianProvider)
 
@@ -231,7 +231,7 @@ class TestBailianProviderCacheMeta:
 
     def test_extract_cache_meta_no_cache_hit(self):
         """Should correctly handle case with no cache hit."""
-        from ieeA.translator.bailian_provider import BailianProvider
+        from arxiv_translate.translator.bailian_provider import BailianProvider
 
         provider = BailianProvider.__new__(BailianProvider)
 
@@ -251,7 +251,7 @@ class TestBailianProviderCacheMeta:
 
     def test_extract_cache_meta_missing_details(self):
         """Should handle missing prompt_tokens_details gracefully."""
-        from ieeA.translator.bailian_provider import BailianProvider
+        from arxiv_translate.translator.bailian_provider import BailianProvider
 
         provider = BailianProvider.__new__(BailianProvider)
 
@@ -270,7 +270,7 @@ class TestBailianProviderCacheMeta:
 
     def test_extract_cache_meta_missing_usage(self):
         """Should return None when usage is missing."""
-        from ieeA.translator.bailian_provider import BailianProvider
+        from arxiv_translate.translator.bailian_provider import BailianProvider
 
         provider = BailianProvider.__new__(BailianProvider)
 
@@ -283,7 +283,7 @@ class TestBailianProviderCacheMeta:
 
     def test_extract_cache_meta_with_dict_usage(self):
         """Should handle dict-style usage object (from some API responses)."""
-        from ieeA.translator.bailian_provider import BailianProvider
+        from arxiv_translate.translator.bailian_provider import BailianProvider
 
         provider = BailianProvider.__new__(BailianProvider)
 
@@ -308,7 +308,7 @@ class TestBailianProviderCacheMeta:
 
     async def test_cache_meta_stored_on_translate(self):
         """Cache metadata should be stored in _last_cache_meta after translate."""
-        with patch("ieeA.translator.openai_provider.openai") as mock_openai:
+        with patch("arxiv_translate.translator.openai_provider.openai") as mock_openai:
             mock_client = MagicMock()
             mock_response = MagicMock()
             mock_response.choices = [MagicMock()]
@@ -322,7 +322,7 @@ class TestBailianProviderCacheMeta:
             mock_openai.AsyncOpenAI.return_value = mock_client
             mock_openai.Timeout = MagicMock()
 
-            from ieeA.translator.bailian_provider import BailianProvider
+            from arxiv_translate.translator.bailian_provider import BailianProvider
 
             provider = BailianProvider(model="qwen-max", api_key="test-key")
 
@@ -334,7 +334,7 @@ class TestBailianProviderCacheMeta:
 
     async def test_cache_meta_printed(self, capsys):
         """Cache metadata should be printed after translate."""
-        with patch("ieeA.translator.openai_provider.openai") as mock_openai:
+        with patch("arxiv_translate.translator.openai_provider.openai") as mock_openai:
             mock_client = MagicMock()
             mock_response = MagicMock()
             mock_response.choices = [MagicMock()]
@@ -348,7 +348,7 @@ class TestBailianProviderCacheMeta:
             mock_openai.AsyncOpenAI.return_value = mock_client
             mock_openai.Timeout = MagicMock()
 
-            from ieeA.translator.bailian_provider import BailianProvider
+            from arxiv_translate.translator.bailian_provider import BailianProvider
 
             provider = BailianProvider(model="qwen-max", api_key="test-key")
 
@@ -366,12 +366,12 @@ class TestBailianProviderFactory:
 
     def test_factory_returns_bailian_provider(self):
         """get_sdk_client('bailian', ...) should return BailianProvider instance."""
-        with patch("ieeA.translator.openai_provider.openai") as mock_openai:
+        with patch("arxiv_translate.translator.openai_provider.openai") as mock_openai:
             mock_openai.AsyncOpenAI = MagicMock()
             mock_openai.Timeout = MagicMock()
 
-            from ieeA.translator import get_sdk_client
-            from ieeA.translator.bailian_provider import BailianProvider
+            from arxiv_translate.translator import get_sdk_client
+            from arxiv_translate.translator.bailian_provider import BailianProvider
 
             provider = get_sdk_client("bailian", model="qwen-max", key="test-key")
 
@@ -383,14 +383,14 @@ class TestBailianProviderConfig:
 
     def test_config_accepts_bailian_sdk(self):
         """LLMConfig(sdk='bailian') should succeed without error."""
-        from ieeA.rules.config import LLMConfig
+        from arxiv_translate.rules.config import LLMConfig
 
         cfg = LLMConfig(sdk="bailian")
         assert cfg.sdk == "bailian"
 
     def test_config_rejects_invalid_sdk(self):
         """LLMConfig(sdk='invalid') should raise ValueError."""
-        from ieeA.rules.config import LLMConfig
+        from arxiv_translate.rules.config import LLMConfig
 
         with pytest.raises(ValueError, match="sdk must be"):
             LLMConfig(sdk="invalid")
@@ -401,7 +401,7 @@ class TestBailianProviderErrorHandling:
 
     async def test_api_error_raises_runtime_error(self):
         """API errors should be wrapped in RuntimeError."""
-        with patch("ieeA.translator.openai_provider.openai") as mock_openai:
+        with patch("arxiv_translate.translator.openai_provider.openai") as mock_openai:
             mock_client = MagicMock()
             mock_client.chat.completions.create = AsyncMock(
                 side_effect=Exception("API connection failed")
@@ -409,7 +409,7 @@ class TestBailianProviderErrorHandling:
             mock_openai.AsyncOpenAI.return_value = mock_client
             mock_openai.Timeout = MagicMock()
 
-            from ieeA.translator.bailian_provider import BailianProvider
+            from arxiv_translate.translator.bailian_provider import BailianProvider
 
             provider = BailianProvider(model="qwen-max", api_key="test-key")
 
@@ -418,7 +418,7 @@ class TestBailianProviderErrorHandling:
 
     async def test_api_error_includes_original_message(self):
         """RuntimeError should include the original error message."""
-        with patch("ieeA.translator.openai_provider.openai") as mock_openai:
+        with patch("arxiv_translate.translator.openai_provider.openai") as mock_openai:
             mock_client = MagicMock()
             mock_client.chat.completions.create = AsyncMock(
                 side_effect=Exception("Rate limit exceeded")
@@ -426,7 +426,7 @@ class TestBailianProviderErrorHandling:
             mock_openai.AsyncOpenAI.return_value = mock_client
             mock_openai.Timeout = MagicMock()
 
-            from ieeA.translator.bailian_provider import BailianProvider
+            from arxiv_translate.translator.bailian_provider import BailianProvider
 
             provider = BailianProvider(model="qwen-max", api_key="test-key")
 
@@ -441,7 +441,7 @@ class TestBailianProviderGetFieldHelper:
 
     def test_get_field_from_object(self):
         """Should get attribute from object."""
-        from ieeA.translator.bailian_provider import BailianProvider
+        from arxiv_translate.translator.bailian_provider import BailianProvider
 
         class MockObj:
             attr = "value"
@@ -451,7 +451,7 @@ class TestBailianProviderGetFieldHelper:
 
     def test_get_field_from_dict(self):
         """Should get key from dict."""
-        from ieeA.translator.bailian_provider import BailianProvider
+        from arxiv_translate.translator.bailian_provider import BailianProvider
 
         data = {"key": "value"}
         result = BailianProvider._get_field(data, "key")
@@ -459,7 +459,7 @@ class TestBailianProviderGetFieldHelper:
 
     def test_get_field_with_default(self):
         """Should return default when field missing."""
-        from ieeA.translator.bailian_provider import BailianProvider
+        from arxiv_translate.translator.bailian_provider import BailianProvider
 
         class MockObj:
             pass
@@ -469,7 +469,7 @@ class TestBailianProviderGetFieldHelper:
 
     def test_get_field_from_none(self):
         """Should return default when obj is None."""
-        from ieeA.translator.bailian_provider import BailianProvider
+        from arxiv_translate.translator.bailian_provider import BailianProvider
 
         result = BailianProvider._get_field(None, "key", "default")
         assert result == "default"

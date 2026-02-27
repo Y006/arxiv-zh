@@ -8,7 +8,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from ieeA.translator.openai_provider import OpenAIProvider
+from arxiv_translate.translator.openai_provider import OpenAIProvider
 
 # User-provided API configuration
 API_CONFIG = {
@@ -37,7 +37,7 @@ TEST_CASES = [
 async def test_translation():
     """Test translation with the provided API endpoint."""
     print("=" * 60)
-    print("ieeT Translation API Test")
+    print("arxiv-translate Translation API Test")
     print("=" * 60)
     print(f"API Endpoint: {API_CONFIG['base_url']}")
     print(f"Model: {API_CONFIG['model']}")

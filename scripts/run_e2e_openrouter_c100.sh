@@ -44,7 +44,7 @@ for i in $(seq 1 "${MAX_RETRY}"); do
   RUN_LOG="${OUT_ROOT}/run_attempt_${i}.log"
   mkdir -p "${OUT_ROOT}"
   echo "-- Attempt ${i}/${MAX_RETRY}"
-  if PYTHONPATH=src python -m ieeA.cli translate "${ARXIV_ID}" \
+  if PYTHONPATH=src python -m arxiv_translate.cli translate "${ARXIV_ID}" \
       --output-dir "${OUT_ROOT}" \
       --model "${MODEL}" \
       --endpoint "${ENDPOINT}" \

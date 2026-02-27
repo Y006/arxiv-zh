@@ -2,8 +2,8 @@
 import tempfile
 from pathlib import Path
 
-from ieeA.compiler.chinese_support import inject_chinese_support
-from ieeA.compiler.engine import TeXCompiler
+from arxiv_translate.compiler.chinese_support import inject_chinese_support
+from arxiv_translate.compiler.engine import TeXCompiler
 
 
 def main() -> int:

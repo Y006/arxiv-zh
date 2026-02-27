@@ -1,6 +1,6 @@
 # Known Limitations
 
-This document describes the current limitations of ieeT and potential workarounds.
+This document describes the current limitations of arxiv-translate and potential workarounds.
 
 ## LaTeX Parsing Limitations
 
@@ -8,7 +8,7 @@ This document describes the current limitations of ieeT and potential workaround
 
 **Limitation:** Papers with heavily customized macros may not parse correctly.
 
-**Details:** ieeT uses pylatexenc for parsing, which handles standard LaTeX well but may struggle with:
+**Details:** arxiv-translate uses pylatexenc for parsing, which handles standard LaTeX well but may struggle with:
 - Custom macro definitions with complex argument patterns
 - Non-standard package commands
 - Self-defined environments
@@ -47,7 +47,7 @@ This document describes the current limitations of ieeT and potential workaround
 
 **Limitation:** LLMs may occasionally alter mathematical expressions.
 
-**Details:** While ieeT preserves math environments as placeholders, the surrounding text translation may affect mathematical meaning.
+**Details:** While arxiv-translate preserves math environments as placeholders, the surrounding text translation may affect mathematical meaning.
 
 **Workaround:** Always review mathematical sections carefully.
 
@@ -185,7 +185,7 @@ If you encounter a limitation not listed here:
    - Paper ID or minimal example
    - Expected behavior
    - Actual behavior
-   - ieeT version
+   - arxiv-translate version
 
 ## See Also
 

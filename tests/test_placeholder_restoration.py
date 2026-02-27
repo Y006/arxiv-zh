@@ -3,8 +3,8 @@
 import pytest
 from pathlib import Path
 import tempfile
-from ieeA.parser.latex_parser import LaTeXParser
-from ieeA.parser.structure import LaTeXDocument, Chunk
+from arxiv_translate.parser.latex_parser import LaTeXParser
+from arxiv_translate.parser.structure import LaTeXDocument, Chunk
 
 
 class TestPlaceholderRestoration:

@@ -3,14 +3,14 @@ requires = ["setuptools>=64", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ieeA"
+name = "arxiv-translate"
 dynamic = ["version"]
 description = "arXiv 论文翻译工具 - 将英文 LaTeX 论文翻译成中文，保留数学公式和文档结构"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "GPL-3.0-or-later"}
 authors = [
-  {name = "ieeA Team"},
+  {name = "arxiv-translate Team"},
 ]
 keywords = ["arxiv", "latex", "translation", "chinese", "llm", "academic", "paper"]
 classifiers = [
@@ -45,11 +45,12 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ieeA/ieeA"
-Repository = "https://github.com/ieeA/ieeA"
+Homepage = "https://github.com/zcyisiee/arxiv-translate"
+Repository = "https://github.com/zcyisiee/arxiv-translate"
 
 [project.scripts]
-ieeA = "ieeA.cli:main"
+arx = "arxiv_translate.cli:main"
+arxiv-translate = "arxiv_translate.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

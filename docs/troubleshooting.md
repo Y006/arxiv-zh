@@ -1,6 +1,6 @@
 # Troubleshooting Guide
 
-This guide covers common issues and their solutions when using ieeT.
+This guide covers common issues and their solutions when using arxiv-translate.
 
 ## Installation Issues
 
@@ -160,7 +160,7 @@ The parser selected the wrong main .tex file.
 **Solution:**
 Specify the main file explicitly:
 ```bash
-ieeA translate ./paper/main.tex
+arx translate ./paper/main.tex
 ```
 
 ## Translation Issues
@@ -286,7 +286,7 @@ The LLM removed a citation. Options:
 If translation was interrupted:
 ```bash
 # State is saved automatically, just run again
-ieeA translate paper.tex
+arx translate paper.tex
 # Will resume from last completed chunk
 ```
 
@@ -295,7 +295,7 @@ ieeA translate paper.tex
 To start fresh:
 ```bash
 rm .cache/state.json
-ieeA translate paper.tex
+arx translate paper.tex
 ```
 
 ## Getting Help
@@ -307,7 +307,7 @@ ieeA translate paper.tex
 ### Reporting issues
 
 When reporting issues, include:
-1. ieeT version: `ieeA --version`
+1. arxiv-translate version: `arx --version`
 2. Python version: `python --version`
 3. OS and version
 4. Full error message

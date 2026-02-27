@@ -12,7 +12,7 @@ import os
 import tempfile
 import pytest
 from pathlib import Path
-from ieeA.parser.latex_parser import LaTeXParser
+from arxiv_translate.parser.latex_parser import LaTeXParser
 
 
 class TestBibliographyResolve:

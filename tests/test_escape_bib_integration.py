@@ -21,8 +21,8 @@ import tempfile
 from pathlib import Path
 import pytest
 
-from ieeA.parser.latex_parser import LaTeXParser
-from ieeA.parser.structure import LaTeXDocument, Chunk, escape_latex_special_chars
+from arxiv_translate.parser.latex_parser import LaTeXParser
+from arxiv_translate.parser.structure import LaTeXDocument, Chunk, escape_latex_special_chars
 
 
 class TestE2EEscape:

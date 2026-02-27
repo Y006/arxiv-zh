@@ -1,6 +1,6 @@
 import re
 
-from ieeA.parser.latex_parser import LaTeXParser
+from arxiv_translate.parser.latex_parser import LaTeXParser
 
 
 def _extract_caption_chunks(text: str):

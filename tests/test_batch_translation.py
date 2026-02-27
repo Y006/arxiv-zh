@@ -3,8 +3,8 @@
 import pytest
 import re
 from unittest.mock import AsyncMock, MagicMock, patch
-from ieeA.translator.pipeline import TranslationPipeline, TranslatedChunk
-from ieeA.translator.prompts import build_batch_translation_text
+from arxiv_translate.translator.pipeline import TranslationPipeline, TranslatedChunk
+from arxiv_translate.translator.prompts import build_batch_translation_text
 
 
 class TestPlaceholderSkipping:

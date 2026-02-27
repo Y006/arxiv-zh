@@ -2,8 +2,8 @@
 
 import pytest
 from unittest.mock import MagicMock
-from ieeA.rules.glossary import Glossary, GlossaryEntry
-from ieeA.translator.pipeline import TranslationPipeline
+from arxiv_translate.rules.glossary import Glossary, GlossaryEntry
+from arxiv_translate.translator.pipeline import TranslationPipeline
 
 
 @pytest.fixture

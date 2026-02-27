@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 
-from ieeA.parser.latex_parser import LaTeXParser
+from arxiv_translate.parser.latex_parser import LaTeXParser
 
 
 def _has_prefix(keys: list[str], prefix: str) -> bool:

@@ -1,20 +1,20 @@
 # Configuration Guide
 
-This guide covers all configuration options for ieeA.
+This guide covers all configuration options for arxiv-translate.
 
 ## Configuration Hierarchy
 
-ieeA uses a layered configuration system (later layers override earlier):
+arxiv-translate uses a layered configuration system (later layers override earlier):
 
-1. Built-in defaults: `src/ieeA/defaults/config.yaml`
-2. User config: `~/.ieeA/config.yaml`
+1. Built-in defaults: `src/arxiv_translate/defaults/config.yaml`
+2. User config: `~/.config/arxiv-translate/config.yaml`
 3. Command-line flags: override selected settings
 
 ## Creating a Configuration File
 
 ### User Configuration
 
-Create `~/.ieeA/config.yaml`:
+Create `~/.config/arxiv-translate/config.yaml`:
 
 ```yaml
 llm:
@@ -124,7 +124,7 @@ parser:
 
 ### Glossary File (separate)
 
-The glossary is loaded from `~/.ieeA/glossary.yaml` and is not part of `config.yaml`.
+The glossary is loaded from `~/.config/arxiv-translate/glossary.yaml` and is not part of `config.yaml`.
 See [Custom Rules & Glossary](custom-rules.md).
 
 ## Command-Line Overrides
@@ -133,29 +133,29 @@ Selected settings can be overridden via command line:
 
 ```bash
 # Override SDK, model, key, endpoint
-ieeA translate paper.tex --sdk anthropic --model claude-3-sonnet-20240229 --key "sk-..."
-ieeA translate paper.tex --endpoint https://openrouter.ai/api/v1/chat/completions
+arx translate paper.tex --sdk anthropic --model claude-3-sonnet-20240229 --key "sk-..."
+arx translate paper.tex --endpoint https://openrouter.ai/api/v1/chat/completions
 
 # Override output directory
-ieeA translate paper.tex --output-dir ./my-output/
+arx translate paper.tex --output-dir ./my-output/
 
 # Control concurrency
-ieeA translate paper.tex --concurrency 20
+arx translate paper.tex --concurrency 20
 
 # Enable high-quality translation mode
-ieeA translate https://arxiv.org/abs/2301.07041 --high-quality
+arx translate https://arxiv.org/abs/2301.07041 --high-quality
 
 # Provide custom abstract for context
-ieeA translate https://arxiv.org/abs/2301.07041 --high-quality --abstract "This paper proposes..."
+arx translate https://arxiv.org/abs/2301.07041 --high-quality --abstract "This paper proposes..."
 
 # Skip compilation or keep source
-ieeA translate paper.tex --no-compile --keep-source
+arx translate paper.tex --no-compile --keep-source
 ```
 
 ## Complete Example Configuration
 
 ```yaml
-# ~/.ieeA/config.yaml - Full example
+# ~/.config/arxiv-translate/config.yaml - Full example
 
 llm:
   sdk: openai
@@ -172,7 +172,7 @@ compilation:
 
 paths:
   output_dir: ~/Documents/translations
-  cache_dir: ~/.ieeA/cache
+  cache_dir: ~/.config/arxiv-translate/cache
 
 fonts:
   auto_detect: true
@@ -194,7 +194,7 @@ parser:
 
 ## Configuration Validation
 
-ieeA validates configuration on startup. Invalid settings will produce clear error messages:
+arx validates configuration on startup. Invalid settings will produce clear error messages:
 
 ```
 Error: Invalid configuration

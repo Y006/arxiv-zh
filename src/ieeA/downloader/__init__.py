@@ -1,3 +1,1 @@
-from .arxiv import ArxivDownloader, DownloadResult
-
-__all__ = ["ArxivDownloader", "DownloadResult"]
+from arxiv_translate.downloader import *  # noqa: F401,F403

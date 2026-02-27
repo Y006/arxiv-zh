@@ -1,12 +1,12 @@
 # Installation Guide
 
-This guide covers all installation methods for ieeT.
+This guide covers all installation methods for arxiv-translate.
 
 ## System Requirements
 
 ### Required
 
-- **Python 3.10+**: ieeT requires Python 3.10 or newer
+- **Python 3.10+**: arxiv-translate requires Python 3.10 or newer
 - **XeLaTeX**: Required for compiling translated documents to PDF
 - **Network Access**: For downloading arXiv papers and LLM API calls
 
@@ -60,12 +60,12 @@ sudo apt install texlive-xetex texlive-lang-chinese
 **Windows:**
 Download and install [MiKTeX](https://miktex.org/download) or [TeX Live](https://www.tug.org/texlive/).
 
-### Step 3: Install ieeT
+### Step 3: Install arxiv-translate
 
 **From source (recommended for development):**
 ```bash
-git clone https://github.com/your-org/ieet.git
-cd ieet
+git clone https://github.com/zcyisiee/arxiv-translate.git
+cd arxiv-translate
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -e .
@@ -78,7 +78,7 @@ pip install -e ".[dev]"
 
 ### Step 4: Configure API Keys
 
-ieeT requires an API key for at least one LLM provider:
+arxiv-translate requires an API key for at least one LLM provider:
 
 **OpenAI:**
 ```bash
@@ -105,8 +105,8 @@ For permanent configuration, add these to your shell profile (`~/.bashrc`, `~/.z
 ### Step 5: Verify Installation
 
 ```bash
-# Check ieeT is installed
-ieeA --version
+# Check arxiv-translate is installed
+arx --version
 
 # Check XeLaTeX is available
 xelatex --version
@@ -121,14 +121,14 @@ We strongly recommend using a virtual environment:
 
 ```bash
 # Create virtual environment
-python -m venv ieet-env
+python -m venv arxiv-translate-env
 
 # Activate it
-source ieet-env/bin/activate  # Linux/macOS
+source arxiv-translate-env/bin/activate  # Linux/macOS
 # or
-ieet-env\Scripts\activate     # Windows
+arxiv-translate-env\Scripts\activate     # Windows
 
-# Install ieeT
+# Install arxiv-translate
 pip install -e .
 ```
 
@@ -137,8 +137,8 @@ pip install -e .
 For a containerized installation (coming soon):
 
 ```bash
-docker pull your-org/ieet:latest
-docker run -v $(pwd):/workspace ieeA translate paper.tex
+docker pull your-org/arxiv-translate:latest
+docker run -v $(pwd):/workspace arx translate paper.tex
 ```
 
 ## Troubleshooting Installation
@@ -183,10 +183,10 @@ sudo apt install python3-dev build-essential
 xcode-select --install
 ```
 
-## Updating ieeT
+## Updating arxiv-translate
 
 ```bash
-cd ieet
+cd arxiv-translate
 git pull
 pip install -e .
 ```
@@ -194,10 +194,10 @@ pip install -e .
 ## Uninstalling
 
 ```bash
-pip uninstall ieet
+pip uninstall arxiv-translate
 ```
 
 ## Next Steps
 
-- [Configuration Guide](configuration.md) - Configure ieeT for your needs
+- [Configuration Guide](configuration.md) - Configure arxiv-translate for your needs
 - [Quick Start](../README.md#quick-start) - Start translating papers

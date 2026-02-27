@@ -31,7 +31,7 @@ def mock_openai_response_factory():
 @pytest.fixture
 def sample_glossary():
     """Create a sample Glossary for testing."""
-    from ieeA.rules.glossary import Glossary, GlossaryEntry
+    from arxiv_translate.rules.glossary import Glossary, GlossaryEntry
 
     return Glossary(
         terms={

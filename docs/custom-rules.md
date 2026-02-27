@@ -1,6 +1,6 @@
 # Custom Rules & Glossary Guide
 
-This guide covers how to create custom glossaries and validation rules for ieeT.
+This guide covers how to create custom glossaries and validation rules for arxiv-translate.
 
 ## Glossary
 
@@ -49,10 +49,10 @@ Create a YAML file with term mappings:
 
 ```bash
 # Via command line
-ieeA translate paper.tex --glossary my-glossary.yaml
+arx translate paper.tex --glossary my-glossary.yaml
 
 # Via configuration
-# In ~/.ieeA/config.yaml:
+# In ~/.config/arxiv-translate/config.yaml:
 glossary:
   path: ~/my-glossary.yaml
   use_builtin: true
@@ -61,7 +61,7 @@ glossary:
 
 ### Built-in Glossary
 
-ieeT includes a built-in glossary with common ML/AI terms. To use only the built-in glossary:
+arxiv-translate includes a built-in glossary with common ML/AI terms. To use only the built-in glossary:
 
 ```yaml
 glossary:
@@ -141,7 +141,7 @@ rules:
 
 ```bash
 # Via command line
-ieeA translate paper.tex --rules my-rules.yaml
+arx translate paper.tex --rules my-rules.yaml
 
 # Via configuration
 validation:
@@ -154,12 +154,12 @@ Rules with a `replacement` field can automatically fix issues:
 
 ```bash
 # Apply auto-fixes
-ieeA translate paper.tex --auto-fix
+arx translate paper.tex --auto-fix
 ```
 
 ### Built-in Validation
 
-ieeT performs these validations automatically:
+arxiv-translate performs these validations automatically:
 
 1. **Brace Balance**: Check `{}`, `()`, `[]` are balanced
 2. **Citation Preservation**: All `\cite{}` references preserved

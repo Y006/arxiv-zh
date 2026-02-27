@@ -1,21 +1,128 @@
-"""Volcano Engine Ark provider with context API caching."""
+"""Volcano Engine Ark provider with context API caching (HTTP implementation)."""
 
 import asyncio
 import datetime
 import json
-from typing import Optional, Dict, List, Any
+from types import SimpleNamespace
+from typing import Optional, Dict, List, Any, Set
+
+import httpx
 
 from .llm_base import LLMProvider
 from .prompts import build_system_prompt
 
-_AsyncArk = None
-try:
-    from volcenginesdkarkruntime import AsyncArk as _AsyncArkClass
+# Legacy compatibility flag. Ark provider is now HTTP-native and always available.
+HAS_ARK = True
 
-    _AsyncArk = _AsyncArkClass
-    HAS_ARK = True
-except ImportError:
-    HAS_ARK = False
+
+def _to_namespace(value: Any) -> Any:
+    if isinstance(value, dict):
+        return SimpleNamespace(**{k: _to_namespace(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return [_to_namespace(v) for v in value]
+    return value
+
+
+class _ArkContextCompletionsAPI:
+    def __init__(self, client: "_ArkHTTPClient"):
+        self._client = client
+
+    async def create(
+        self,
+        *,
+        context_id: str,
+        model: str,
+        messages: List[Dict[str, str]],
+        temperature: float,
+    ) -> Any:
+        return await self._client._post(
+            "/context/completions",
+            {
+                "context_id": context_id,
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+            },
+        )
+
+
+class _ArkContextAPI:
+    def __init__(self, client: "_ArkHTTPClient"):
+        self._client = client
+        self.completions = _ArkContextCompletionsAPI(client)
+
+    async def create(
+        self,
+        *,
+        model: str,
+        mode: str,
+        messages: List[Dict[str, str]],
+        ttl: Any,
+    ) -> Any:
+        ttl_seconds: int
+        if isinstance(ttl, datetime.timedelta):
+            ttl_seconds = int(ttl.total_seconds())
+        else:
+            ttl_seconds = int(ttl)
+
+        return await self._client._post(
+            "/context/create",
+            {
+                "model": model,
+                "mode": mode,
+                "messages": messages,
+                "ttl": ttl_seconds,
+            },
+        )
+
+
+class _ArkChatCompletionsAPI:
+    def __init__(self, client: "_ArkHTTPClient"):
+        self._client = client
+
+    async def create(
+        self,
+        *,
+        model: str,
+        messages: List[Dict[str, Any]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Any:
+        body: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+        }
+        if temperature is not None:
+            body["temperature"] = temperature
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        return await self._client._post("/chat/completions", body)
+
+
+class _ArkChatAPI:
+    def __init__(self, client: "_ArkHTTPClient"):
+        self.completions = _ArkChatCompletionsAPI(client)
+
+
+class _ArkHTTPClient:
+    def __init__(self, base_url: str, api_key: Optional[str]):
+        self._base_url = base_url.rstrip("/")
+        self._headers: Dict[str, str] = {"Content-Type": "application/json"}
+        if api_key:
+            self._headers["Authorization"] = f"Bearer {api_key}"
+
+        self._http = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=60.0, read=300.0, write=60.0, pool=60.0)
+        )
+        self.context = _ArkContextAPI(self)
+        self.chat = _ArkChatAPI(self)
+
+    async def _post(self, suffix: str, body: Dict[str, Any]) -> Any:
+        url = f"{self._base_url}{suffix}"
+        response = await self._http.post(url, json=body, headers=self._headers)
+        response.raise_for_status()
+        data = response.json()
+        return _to_namespace(data)
 
 
 class ArkProvider(LLMProvider):
@@ -29,27 +136,27 @@ class ArkProvider(LLMProvider):
         **kwargs,
     ):
         super().__init__(model, api_key, **kwargs)
-        if not HAS_ARK or _AsyncArk is None:
-            raise ImportError(
-                "volcenginesdkarkruntime is required for ArkProvider. "
-                "Install with: pip install 'volcengine-python-sdk[ark]'"
-            )
+        if not base_url:
+            raise ValueError("base_url is required for ArkProvider")
 
-        client_kwargs: Dict[str, Any] = {}
-        if api_key:
-            client_kwargs["api_key"] = api_key
-        if base_url:
-            client_kwargs["base_url"] = base_url
-
-        self.client = _AsyncArk(**client_kwargs)
+        normalized_base_url = self._normalize_base_url(base_url)
+        self.client = _ArkHTTPClient(base_url=normalized_base_url, api_key=api_key)
         self._context_id: Optional[str] = None
         self._context_ids: Dict[str, str] = {}
         self._context_prefix_keys: Dict[str, str] = {}
         self._context_setup_locks: Dict[str, asyncio.Lock] = {}
+        self._context_fallback_warned_variants: Set[str] = set()
         self._prebuilt_system_prompt: Optional[str] = None
         self._prebuilt_batch_prompt: Optional[str] = None
         self._cache_log_verbose = bool(self.kwargs.get("ark_cache_log_verbose", False))
         self.reset_cache_stats()
+
+    @staticmethod
+    def _normalize_base_url(base_url: str) -> str:
+        normalized = base_url.rstrip("/")
+        if normalized.endswith("/chat/completions"):
+            normalized = normalized[: -len("/chat/completions")]
+        return normalized.rstrip("/")
 
     @staticmethod
     def _get_field(obj: Any, key: str, default: Any = None) -> Any:
@@ -69,6 +176,11 @@ class ArkProvider(LLMProvider):
             or self._context_setup_locks is None  # type: ignore[attr-defined]
         ):
             self._context_setup_locks = {}
+        if (
+            not hasattr(self, "_context_fallback_warned_variants")
+            or self._context_fallback_warned_variants is None  # type: ignore[attr-defined]
+        ):
+            self._context_fallback_warned_variants = set()
 
         legacy_context_id = getattr(self, "_context_id", None)
         if legacy_context_id and "individual" not in self._context_ids:
@@ -268,6 +380,36 @@ class ArkProvider(LLMProvider):
         messages.extend(self._build_few_shot_messages(few_shot_examples))
         return messages
 
+    @staticmethod
+    def _extract_message_content(response: Any) -> str:
+        def _content_to_text(content: Any) -> str:
+            if content is None:
+                return ""
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts: List[str] = []
+                for item in content:
+                    if isinstance(item, str):
+                        parts.append(item)
+                        continue
+                    item_type = ArkProvider._get_field(item, "type", "")
+                    if item_type == "text":
+                        parts.append(str(ArkProvider._get_field(item, "text", "")))
+                        continue
+                    text_value = ArkProvider._get_field(item, "text", None)
+                    if text_value is not None:
+                        parts.append(str(text_value))
+                return "".join(parts)
+            return str(content)
+
+        choices = ArkProvider._get_field(response, "choices", []) or []
+        if not choices:
+            return ""
+        message = ArkProvider._get_field(choices[0], "message", {})
+        content = ArkProvider._get_field(message, "content", "")
+        return _content_to_text(content).strip()
+
     def _extract_cache_meta(
         self,
         response: Any,
@@ -322,6 +464,45 @@ class ArkProvider(LLMProvider):
             f"context_id={cache_meta.get('context_id')}"
         )
 
+    def _warn_context_fallback_once(self, prompt_variant: str, reason: Any) -> None:
+        self._ensure_context_state()
+        if prompt_variant in self._context_fallback_warned_variants:
+            return
+        self._context_fallback_warned_variants.add(prompt_variant)
+        reason_text = " ".join(str(reason).split())
+        print(
+            "[ARK CACHE] "
+            f"variant={prompt_variant} mode=chat fallback=True reason={reason_text}"
+        )
+
+    def _build_chat_messages(
+        self,
+        *,
+        text: str,
+        context: Optional[str],
+        glossary_hints: Optional[Dict[str, str]],
+        few_shot_examples: Optional[List[Dict[str, str]]],
+        custom_system_prompt: Optional[str],
+        prompt_variant: str,
+    ) -> List[Dict[str, Any]]:
+        few_shot_messages = self._build_few_shot_messages(few_shot_examples)
+        selected_prebuilt_prompt = self._get_prebuilt_prompt(prompt_variant)
+
+        if selected_prebuilt_prompt is not None and glossary_hints is None:
+            system_content = selected_prebuilt_prompt
+        else:
+            system_content = build_system_prompt(
+                glossary_hints=glossary_hints,
+                context=context,
+                few_shot_examples=few_shot_examples,
+                custom_system_prompt=custom_system_prompt,
+            )
+
+        messages: List[Dict[str, Any]] = [{"role": "system", "content": system_content}]
+        messages.extend(few_shot_messages)
+        messages.append({"role": "user", "content": text})
+        return messages
+
     async def setup_context(
         self,
         system_prompt: Optional[str] = None,
@@ -329,13 +510,7 @@ class ArkProvider(LLMProvider):
         prompt_variant: str = "individual",
         few_shot_examples: Optional[List[Dict[str, str]]] = None,
     ) -> None:
-        """Create a cached context with the stable prefix (system + few-shot).
-
-        Args:
-            system_prompt: The system prompt to cache. If None, uses prebuilt prompt for variant.
-            prompt_variant: Prefix variant name ("individual" or "batch").
-            few_shot_examples: Few-shot examples to include in the cached prefix.
-        """
+        """Create a cached context with the stable prefix (system + few-shot)."""
         self._ensure_context_state()
         prefix_messages = self._build_context_prefix_messages(
             prompt_variant=prompt_variant,
@@ -358,9 +533,14 @@ class ArkProvider(LLMProvider):
                 messages=prefix_messages,
                 ttl=datetime.timedelta(minutes=5),
             )
+            context_id = self._get_field(context, "id") or self._get_field(
+                context, "context_id"
+            )
+            if not context_id:
+                raise RuntimeError("Ark context.create response missing context id")
             self._set_context_id_for_variant(
                 prompt_variant=prompt_variant,
-                context_id=context.id,
+                context_id=str(context_id),
                 prefix_key=prefix_key,
             )
 
@@ -393,13 +573,10 @@ class ArkProvider(LLMProvider):
         prompt_variant: str = "individual",
     ) -> str:
         self._ensure_context_state()
-        few_shot_messages = self._build_few_shot_messages(few_shot_examples)
         selected_prebuilt_prompt = self._get_prebuilt_prompt(prompt_variant)
         current_context_id = self._get_context_id_for_variant(prompt_variant)
-
         user_message = {"role": "user", "content": text}
 
-        # Determine if we use context API (pre-built prompt) or standard path
         use_context = (
             selected_prebuilt_prompt is not None
             and glossary_hints is None
@@ -407,78 +584,72 @@ class ArkProvider(LLMProvider):
         )
 
         context_messages: List[Dict[str, str]] = [user_message]
-        chat_messages: Optional[List[Dict[str, str]]] = None
 
         try:
             used_context = False
+            response: Any
             if use_context:
-                # Use context API for cached system prompt
                 try:
                     response = await self.client.context.completions.create(
-                        context_id=current_context_id,
+                        context_id=current_context_id or "",
                         model=self.model,
                         messages=context_messages,
                         temperature=self.kwargs.get("temperature", 0.3),
                     )
                     used_context = True
-                except Exception:
-                    # Context may have expired (TTL), rebuild and retry
+                except Exception as first_context_error:
                     try:
                         await self.setup_context(
                             prompt_variant=prompt_variant,
                             few_shot_examples=few_shot_examples,
                         )
-                    except Exception as warmup_error:
-                        print(
-                            "[ARK CACHE] "
-                            f"variant={prompt_variant} "
-                            "mode=chat "
-                            "warmup_failed=True "
-                            f"reason={warmup_error}"
-                        )
+                    except Exception:
+                        # If context rebuild fails, we will fallback to chat path.
+                        pass
 
                     current_context_id = self._get_context_id_for_variant(prompt_variant)
                     if current_context_id:
-                        response = await self.client.context.completions.create(
-                            context_id=current_context_id,
-                            model=self.model,
-                            messages=context_messages,
-                            temperature=self.kwargs.get("temperature", 0.3),
-                        )
-                        used_context = True
-                    else:
-                        # Fallback to standard call
-                        if selected_prebuilt_prompt is not None and glossary_hints is None:
-                            system_content = selected_prebuilt_prompt
-                        else:
-                            system_content = build_system_prompt(
-                                glossary_hints=glossary_hints,
-                                context=context,
-                                few_shot_examples=few_shot_examples,
-                                custom_system_prompt=custom_system_prompt,
+                        try:
+                            response = await self.client.context.completions.create(
+                                context_id=current_context_id,
+                                model=self.model,
+                                messages=context_messages,
+                                temperature=self.kwargs.get("temperature", 0.3),
                             )
-                        chat_messages = [{"role": "system", "content": system_content}]
-                        chat_messages.extend(few_shot_messages)
-                        chat_messages.append(user_message)
+                            used_context = True
+                        except Exception as second_context_error:
+                            self._warn_context_fallback_once(
+                                prompt_variant,
+                                f"{first_context_error}; {second_context_error}",
+                            )
+                    else:
+                        self._warn_context_fallback_once(
+                            prompt_variant, first_context_error
+                        )
+
+                    if not used_context:
+                        chat_messages = self._build_chat_messages(
+                            text=text,
+                            context=context,
+                            glossary_hints=glossary_hints,
+                            few_shot_examples=few_shot_examples,
+                            custom_system_prompt=custom_system_prompt,
+                            prompt_variant=prompt_variant,
+                        )
                         response = await self.client.chat.completions.create(
                             model=self.model,
                             messages=chat_messages,
                             temperature=self.kwargs.get("temperature", 0.3),
                         )
             else:
-                # Standard API call (no context caching)
-                if selected_prebuilt_prompt is not None and glossary_hints is None:
-                    system_content = selected_prebuilt_prompt
-                else:
-                    system_content = build_system_prompt(
-                        glossary_hints=glossary_hints,
-                        context=context,
-                        few_shot_examples=few_shot_examples,
-                        custom_system_prompt=custom_system_prompt,
-                    )
-                chat_messages = [{"role": "system", "content": system_content}]
-                chat_messages.extend(few_shot_messages)
-                chat_messages.append(user_message)
+                chat_messages = self._build_chat_messages(
+                    text=text,
+                    context=context,
+                    glossary_hints=glossary_hints,
+                    few_shot_examples=few_shot_examples,
+                    custom_system_prompt=custom_system_prompt,
+                    prompt_variant=prompt_variant,
+                )
                 response = await self.client.chat.completions.create(
                     model=self.model,
                     messages=chat_messages,
@@ -499,8 +670,7 @@ class ArkProvider(LLMProvider):
             if cache_meta is not None and self._cache_log_verbose:
                 self._print_cache_meta(cache_meta)
 
-            content = response.choices[0].message.content or ""
-            return content.strip()
+            return self._extract_message_content(response)
         except Exception as e:
             raise RuntimeError(f"Ark API error: {str(e)}") from e
 
@@ -510,7 +680,7 @@ class ArkProvider(LLMProvider):
             messages=[{"role": "user", "content": "Say hi"}],
             max_tokens=10,
         )
-        return (response.choices[0].message.content or "").strip()
+        return self._extract_message_content(response)
 
     def estimate_tokens(self, text: str) -> int:
         # Heuristic: mixed CJK/English ~2.5 chars per token

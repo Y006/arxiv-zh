@@ -28,7 +28,7 @@ from arxiv_translate.rules.user_paths import (
     ensure_config_dir,
     migrate_legacy_files,
 )
-from arxiv_translate.translator import get_sdk_client
+from arxiv_translate.translator import get_sdk_client, should_use_ark_autoroute
 from arxiv_translate.translator.pipeline import TranslationPipeline
 from arxiv_translate.parser.structure import validate_translated_placeholders
 from arxiv_translate.validator.engine import ValidationEngine
@@ -89,6 +89,36 @@ def _print_provider_cache_summary(provider: Any) -> None:
         console.print(line, style="cyan", markup=False)
 
 
+def _validate_provider_args(
+    *,
+    sdk_name: Optional[str],
+    key_val: Optional[str],
+    endpoint_val: Optional[str],
+) -> None:
+    if sdk_name == "ark":
+        console.print(
+            "[bold red]Error:[/bold red] sdk=ark has been removed. "
+            "Please use openai-style config with an Ark endpoint "
+            "(ark.*.volces.com)."
+        )
+        raise typer.Exit(code=1)
+
+    ark_autoroute = should_use_ark_autoroute(sdk_name, endpoint_val)
+    requires_key = sdk_name is not None or ark_autoroute
+    if requires_key and not key_val:
+        if ark_autoroute:
+            console.print(
+                "[bold red]Error:[/bold red] API key is required for Ark endpoint. "
+                "Please set llm.key in config or use --key."
+            )
+        else:
+            console.print(
+                "[bold red]Error:[/bold red] API key not found. "
+                "Please set llm.key in config or use --key."
+            )
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def translate(
     arxiv_url: str = typer.Argument(..., help="arXiv ID or URL to translate"),
@@ -97,7 +127,7 @@ def translate(
     ),
     sdk: Optional[str] = typer.Option(
         None,
-        help="SDK to use (openai, openai-coding, anthropic, anthropic-coding, or None for direct HTTP)",
+        help="SDK to use (openai, openai-coding, anthropic, anthropic-coding, bailian, or None for direct HTTP)",
     ),
     model: Optional[str] = typer.Option(None, help="Model name to use"),
     key: Optional[str] = typer.Option(None, help="API Key"),
@@ -132,12 +162,11 @@ def translate(
     key_val = key or config.llm.key
     endpoint_val = endpoint or config.llm.endpoint
 
-    if sdk_name is not None and not key_val:
-        console.print(
-            f"[bold red]Error:[/bold red] API key not found. "
-            f"Please set llm.key in config or use --key."
-        )
-        raise typer.Exit(code=1)
+    _validate_provider_args(
+        sdk_name=sdk_name,
+        key_val=key_val,
+        endpoint_val=endpoint_val,
+    )
 
     console.print(
         Panel.fit(
@@ -505,7 +534,7 @@ def glossary_add(
 def ping(
     sdk: Optional[str] = typer.Option(
         None,
-        help="SDK to use (openai, openai-coding, anthropic, anthropic-coding, or None for direct HTTP)",
+        help="SDK to use (openai, openai-coding, anthropic, anthropic-coding, bailian, or None for direct HTTP)",
     ),
     model: Optional[str] = typer.Option(None, help="Model name to use"),
     key: Optional[str] = typer.Option(None, help="API Key"),
@@ -520,6 +549,12 @@ def ping(
     model_name = model or config.llm.get_model()
     key_val = key or config.llm.key
     endpoint_val = endpoint or config.llm.endpoint
+
+    _validate_provider_args(
+        sdk_name=sdk_name,
+        key_val=key_val,
+        endpoint_val=endpoint_val,
+    )
 
     console.print(
         Panel.fit(

@@ -54,6 +54,33 @@ def test_factory_returns_correct_type():
 
 
 # ---------------------------------------------------------------------------
+# Test 3.1: openai-coding + Ark endpoint auto-routes to ArkProvider
+# ---------------------------------------------------------------------------
+def test_openai_coding_ark_endpoint_autoroutes(monkeypatch):
+    """openai-coding with Ark endpoint should route to ArkProvider."""
+    import arxiv_translate.translator as translator_mod
+
+    class FakeArkProvider:
+        def __init__(self, model, api_key=None, base_url=None, **kwargs):
+            self.model = model
+            self.api_key = api_key
+            self.base_url = base_url
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(translator_mod, "ArkProvider", FakeArkProvider)
+
+    provider = translator_mod.get_sdk_client(
+        "openai-coding",
+        model="ep-123",
+        key="test-key",
+        endpoint="https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+    )
+
+    assert isinstance(provider, FakeArkProvider)
+    assert provider.base_url == "https://ark.cn-beijing.volces.com/api/v3"
+
+
+# ---------------------------------------------------------------------------
 # Test 4: Message history accumulates across translate calls
 # ---------------------------------------------------------------------------
 async def test_history_accumulates(mock_openai_response):

@@ -100,6 +100,10 @@ export DASHSCOPE_API_KEY="sk-your-key-here"
 export VOLCENGINE_API_KEY="your-key-here"
 ```
 
+Ark integration no longer requires a dedicated client package.
+Use an openai-style sdk (`openai`, `openai-coding`, or `null`) and set
+`llm.endpoint` to an Ark host such as `https://ark.cn-beijing.volces.com/api/v3`.
+
 For permanent configuration, add these to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.).
 
 ### Step 5: Verify Installation

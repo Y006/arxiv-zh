@@ -1,4 +1,5 @@
 from typing import Optional, Any
+from urllib.parse import urlsplit, urlunsplit
 from .llm_base import LLMProvider
 from .openai_provider import OpenAIProvider
 from .openai_coding_provider import OpenAICodingProvider
@@ -12,10 +13,32 @@ def _normalize_openai_base_url(endpoint: Optional[str]) -> Optional[str]:
     """Normalize OpenAI-compatible base URL to avoid duplicate route suffix."""
     if not endpoint:
         return endpoint
+    endpoint = endpoint.rstrip("/")
     suffix = "/chat/completions"
     if endpoint.endswith(suffix):
         return endpoint[: -len(suffix)]
     return endpoint
+
+
+def _normalize_ark_base_url(endpoint: Optional[str]) -> Optional[str]:
+    """Normalize Ark endpoint to API base URL.
+
+    Supports:
+    - https://ark.xx.volces.com/api/v3
+    - https://ark.xx.volces.com/api/v3/chat/completions
+    """
+    if not endpoint:
+        return endpoint
+
+    parsed = urlsplit(endpoint)
+    if not parsed.scheme or not parsed.netloc:
+        return endpoint.rstrip("/")
+
+    path = parsed.path.rstrip("/")
+    if path.endswith("/chat/completions"):
+        path = path[: -len("/chat/completions")]
+    normalized = urlunsplit((parsed.scheme, parsed.netloc, path or "/", "", ""))
+    return normalized.rstrip("/")
 
 
 def _normalize_anthropic_base_url(endpoint: Optional[str]) -> Optional[str]:
@@ -26,6 +49,27 @@ def _normalize_anthropic_base_url(endpoint: Optional[str]) -> Optional[str]:
         if normalized.endswith(suffix):
             return normalized[: -len(suffix)]
     return normalized
+
+
+def is_ark_endpoint(endpoint: Optional[str]) -> bool:
+    """Return True when endpoint host strictly matches ark.*.volces.com."""
+    if not endpoint:
+        return False
+    try:
+        parsed = urlsplit(endpoint)
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host.startswith("ark."):
+        return False
+    if not host.endswith(".volces.com"):
+        return False
+    middle = host[len("ark.") : -len(".volces.com")]
+    return bool(middle)
+
+
+def should_use_ark_autoroute(sdk: Optional[str], endpoint: Optional[str]) -> bool:
+    return sdk in ("openai", "openai-coding", None) and is_ark_endpoint(endpoint)
 
 
 def get_sdk_client(
@@ -39,7 +83,7 @@ def get_sdk_client(
     Factory function to get an LLM SDK client instance.
 
     Args:
-        sdk: The SDK to use (openai, openai-coding, anthropic, anthropic-coding, or None for direct HTTP).
+        sdk: The SDK to use (openai, openai-coding, anthropic, anthropic-coding, bailian, or None for direct HTTP).
         model: The model name to use.
         key: Optional API key.
         endpoint: Optional API endpoint URL.
@@ -48,6 +92,16 @@ def get_sdk_client(
     Returns:
         An instance of LLMProvider.
     """
+    if sdk == "ark":
+        raise ValueError(
+            "sdk=ark has been removed. Please use openai-style config "
+            "with an Ark endpoint (ark.*.volces.com); Ark routing is now automatic."
+        )
+
+    if should_use_ark_autoroute(sdk, endpoint):
+        normalized_endpoint = _normalize_ark_base_url(endpoint)
+        return ArkProvider(model=model, api_key=key, base_url=normalized_endpoint, **kwargs)
+
     if sdk == "openai":
         normalized_endpoint = _normalize_openai_base_url(endpoint)
         return OpenAIProvider(
@@ -74,8 +128,6 @@ def get_sdk_client(
             base_url=normalized_endpoint,
             **kwargs,
         )
-    elif sdk == "ark":
-        return ArkProvider(model=model, api_key=key, base_url=endpoint, **kwargs)
     elif sdk == "bailian":
         from .bailian_provider import BailianProvider
 
@@ -90,7 +142,7 @@ def get_sdk_client(
     else:
         raise ValueError(
             "Unknown sdk: "
-            f"{sdk}. Supported: openai, openai-coding, anthropic, anthropic-coding, ark, bailian, None"
+            f"{sdk}. Supported: openai, openai-coding, anthropic, anthropic-coding, bailian, None"
         )
 
 
@@ -103,5 +155,7 @@ __all__ = [
     "DirectHTTPProvider",
     "ArkProvider",
     "BailianProvider",
+    "is_ark_endpoint",
+    "should_use_ark_autoroute",
     "get_sdk_client",
 ]

@@ -18,7 +18,8 @@ Create `~/.config/arxiv-translate/config.yaml`:
 
 ```yaml
 llm:
-  # SDK: openai | anthropic | null (null = direct HTTP)
+  # SDK: openai | openai-coding | anthropic | anthropic-coding | bailian | null
+  # (null = direct HTTP)
   sdk: null
   # Model name or list (first item is used)
   models: openai/gpt-5-mini
@@ -72,9 +73,12 @@ llm:
 ```
 
 Notes:
-- `sdk` must be `openai`, `anthropic`, or `null`.
+- `sdk` must be `openai`, `openai-coding`, `anthropic`, `anthropic-coding`, `bailian`, or `null`.
 - `models` can be a string or a list; lists use the first item.
 - When `sdk` is not null, `key` is required (or provide `--key` on the CLI).
+- Ark endpoint auto-routing is enabled when host matches `ark.*.volces.com`.
+  Use openai-style sdk (`openai`, `openai-coding`, or `null`) + Ark endpoint.
+  `sdk=ark` is no longer supported.
 
 ### Compilation Settings
 
@@ -198,7 +202,7 @@ arx validates configuration on startup. Invalid settings will produce clear erro
 
 ```
 Error: Invalid configuration
-  llm.sdk: sdk must be 'openai', 'anthropic', or None, got 'invalid'
+  llm.sdk: sdk must be 'openai', 'openai-coding', 'anthropic', 'anthropic-coding', 'bailian', or None, got 'invalid'
   llm.models: models cannot be empty
 ```
 

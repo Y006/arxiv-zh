@@ -251,14 +251,21 @@ class TestArkProviderCache:
         assert hasattr(ArkProvider, "setup_context")
 
     def test_ark_import_error_without_sdk(self):
-        """ArkProvider should raise ImportError when SDK is not installed."""
-        from arxiv_translate.translator.ark_provider import HAS_ARK
+        """ArkProvider should initialize without volcengine SDK dependency."""
+        with patch(
+            "arxiv_translate.translator.ark_provider.httpx.AsyncClient", create=True
+        ) as mock_httpx:
+            mock_httpx.return_value = MagicMock()
 
-        if not HAS_ARK:
             from arxiv_translate.translator.ark_provider import ArkProvider
 
-            with pytest.raises(ImportError, match="volcenginesdkarkruntime"):
-                ArkProvider(model="test")
+            provider = ArkProvider(
+                model="ep-test",
+                api_key="test-key",
+                base_url="https://ark.cn-beijing.volces.com/api/v3",
+            )
+
+            assert provider.client is not None
 
     def test_ark_provider_has_prebuilt_attributes(self):
         """ArkProvider class should support prebuilt prompt attributes."""
@@ -272,19 +279,19 @@ class TestArkProviderCache:
         assert "_prebuilt_batch_prompt" in source
 
     def test_ark_provider_uses_async_client(self):
-        """ArkProvider must use AsyncArk, not sync Ark."""
+        """ArkProvider should use httpx AsyncClient instead of volcengine SDK."""
         import inspect
         from arxiv_translate.translator.ark_provider import ArkProvider
 
         source = inspect.getsource(ArkProvider)
-        # Must NOT contain sync Ark import/usage
-        assert "from volcenginesdkarkruntime import Ark " not in source
-        # Module-level import should be AsyncArk
+        # Must not depend on volcengine SDK imports
+        assert "volcenginesdkarkruntime" not in source
+
         import arxiv_translate.translator.ark_provider as ark_mod
 
         module_source = inspect.getsource(ark_mod)
-        assert "AsyncArk" in module_source
-        assert "import Ark as _ArkClass" not in module_source
+        assert "import httpx" in module_source
+        assert "AsyncClient" in module_source
 
     def test_ark_translate_is_truly_async(self):
         """ArkProvider.translate must be a coroutine function."""
@@ -358,10 +365,7 @@ class TestArkProviderCache:
 
     async def test_ark_concurrent_translate_not_serialized(self):
         """Multiple ArkProvider.translate calls via gather should run concurrently."""
-        from arxiv_translate.translator.ark_provider import ArkProvider, HAS_ARK
-
-        if not HAS_ARK:
-            pytest.skip("volcenginesdkarkruntime not installed")
+        from arxiv_translate.translator.ark_provider import ArkProvider
 
         # Create provider with mocked async client
         provider = ArkProvider.__new__(ArkProvider)

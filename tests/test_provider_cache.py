@@ -252,14 +252,12 @@ class TestArkProviderCache:
 
     def test_ark_import_error_without_sdk(self):
         """ArkProvider should initialize without volcengine SDK dependency."""
-        with patch(
-            "arxiv_translate.translator.ark_provider.httpx.AsyncClient", create=True
-        ) as mock_httpx:
-            mock_httpx.return_value = MagicMock()
+        import arxiv_translate.translator.ark_provider as ark_provider_mod
 
-            from arxiv_translate.translator.ark_provider import ArkProvider
+        with patch.object(ark_provider_mod, "httpx", create=True) as mock_httpx:
+            mock_httpx.AsyncClient.return_value = MagicMock()
 
-            provider = ArkProvider(
+            provider = ark_provider_mod.ArkProvider(
                 model="ep-test",
                 api_key="test-key",
                 base_url="https://ark.cn-beijing.volces.com/api/v3",

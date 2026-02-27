@@ -49,9 +49,25 @@ ModuleNotFoundError: No module named 'pylatexenc'
 
 **Solution:**
 ```bash
-pip install -e .
+pip install -U arxiv-translate
 # or
 pip install pylatexenc pydantic pyyaml requests
+```
+
+### Legacy `ieeA` command not found
+
+**Problem:**
+```bash
+zsh: command not found: ieeA
+```
+
+**Solution:**
+`ieeA` is legacy. Install and use `arxiv-translate` commands:
+
+```bash
+pip install -U arxiv-translate
+arx --help
+arxiv-translate --help
 ```
 
 ## API Key Issues

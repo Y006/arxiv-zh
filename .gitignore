@@ -38,3 +38,9 @@ src/ieeA/__pycache__/
 .sisyphus/
 
 .git_corrupted
+
+发布准备/*
+legacy/ieea-transition/dist/
+legacy/ieea-transition/build/
+legacy/ieea-transition/.venv/
+legacy/ieea-transition/src/ieeA.egg-info/

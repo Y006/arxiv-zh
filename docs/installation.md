@@ -18,7 +18,7 @@ This guide covers all installation methods for arxiv-translate.
 ## Quick Installation
 
 ```bash
-pip install -e .
+pip install arxiv-translate
 ```
 
 ## Detailed Installation
@@ -61,6 +61,11 @@ sudo apt install texlive-xetex texlive-lang-chinese
 Download and install [MiKTeX](https://miktex.org/download) or [TeX Live](https://www.tug.org/texlive/).
 
 ### Step 3: Install arxiv-translate
+
+**From PyPI (recommended):**
+```bash
+pip install arxiv-translate
+```
 
 **From source (recommended for development):**
 ```bash
@@ -116,8 +121,29 @@ arx --version
 xelatex --version
 
 # Run tests (optional)
-pytest -v
+uv run pytest -v
 ```
+
+## Migration from ieeA
+
+If you previously used `ieeA`, migrate to `arxiv-translate`:
+
+```bash
+pip uninstall ieeA
+pip install -U arxiv-translate
+```
+
+Command mapping:
+
+- `ieeA ...` -> `arx ...`
+- `ieeA ...` -> `arxiv-translate ...`
+
+Config migration:
+
+- New config dir: `~/.config/arxiv-translate/`
+- Legacy config dir: `~/.ieeA/`
+- On startup, the tool auto-migrates `config.yaml`, `glossary.yaml`, and
+  `examples.yaml` from legacy dir if missing in new dir.
 
 ## Virtual Environment (Recommended)
 
@@ -133,7 +159,7 @@ source arxiv-translate-env/bin/activate  # Linux/macOS
 arxiv-translate-env\Scripts\activate     # Windows
 
 # Install arxiv-translate
-pip install -e .
+pip install arxiv-translate
 ```
 
 ## Docker Installation
@@ -154,7 +180,7 @@ docker run -v $(pwd):/workspace arx translate paper.tex
 python --version
 
 # Use specific version
-python3.10 -m pip install -e .
+python3.10 -m pip install arxiv-translate
 ```
 
 ### XeLaTeX not found
@@ -173,7 +199,7 @@ export PATH="/usr/local/texlive/2024/bin/x86_64-linux:$PATH"
 
 Use `--user` flag or virtual environment:
 ```bash
-pip install --user -e .
+pip install --user arxiv-translate
 ```
 
 ### Missing dependencies

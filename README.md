@@ -1,23 +1,39 @@
 # arxiv-translate - arXiv 论文翻译工具
 
-阁下提供arxiv链接，我们的工具自动拉取对应的tex代码，将其翻译，输出翻译后的pdf。效果可以参考下图：
+将英文 arXiv LaTeX 论文翻译为中文，尽量保留数学公式、引用与文档结构。
 
-## 快速开始
-阁下可以直接通过pip安装我们的命令行工具: 
+## Quick Start
+
 ```bash
-# 安装
-pip install -e .
+pip install arxiv-translate
 
 # 翻译 arXiv 论文
 arx translate https://arxiv.org/abs/2301.07041 --output-dir output/
 ```
 
-### 主观体验
-gemini3-pro和opus4.6难分伯仲。gemini的翻译效果是最好的：语言风格简洁，意译得很地道，不愧是wmt的常胜将军；相比之下，opus4.6稍微啰嗦一点点，但是语言风格更自然。gpt-5.2-chat次之，主要问题在于有轻微的过度意译，会出现一些原文中没有的描述，不过只有一点点，也还算切题。
+也可使用等价命令：
 
-御三家之下，国产模型还需努力：Qwen系列全部机器人；kimi是国模中效果最好的，可惜幻觉稍微有点大；doubao的文风是最好的，甚至比御三家还要好：但是过度意译太严重，出现了大量原文中没有的描述。这可能是因为目前火山引擎提供的doubao-2.0-pro将温度定死为1，后续如果doubao开放了温度选项，我还是会试试的；deepseek鉴定为拉完了：幻觉满天飞，格式上出了一堆问题。
+```bash
+arxiv-translate translate https://arxiv.org/abs/2301.07041 --output-dir output/
+```
 
-谷歌我日你祖宗，一个文件翻译花了老子3.64，走的openrouter，fucku！
+## 从源码安装（开发）
+
+```bash
+git clone https://github.com/zcyisiee/arxiv-translate.git
+cd arxiv-translate
+pip install -e ".[dev]"
+```
+
+## 从 ieeA 迁移
+
+- 安装命令迁移：`pip install ieeA` -> `pip install arxiv-translate`
+- 命令行迁移：`ieeA ...` -> `arx ...` 或 `arxiv-translate ...`
+- 配置目录迁移：
+  - 新目录：`~/.config/arxiv-translate/`
+  - 旧目录：`~/.ieeA/`
+  - 程序会在启动时自动将 `config.yaml`、`glossary.yaml`、`examples.yaml` 迁移到新目录（若新目录对应文件不存在）
+
 ### 高级选项
 
 #### 批量翻译优化
@@ -256,6 +272,11 @@ src/arxiv_translate/
 - Python 3.10+
 - XeLaTeX（用于 PDF 编译）
 - 中文字体（macOS 自动检测 Songti SC / PingFang SC）
+
+## 发布
+
+- 主包 `arxiv-translate` 发布流程：`docs/release.md`
+- 旧包 `ieeA` 过渡发布配置：`legacy/ieea-transition/`
 
 ## License
 

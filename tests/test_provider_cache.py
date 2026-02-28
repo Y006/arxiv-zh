@@ -372,20 +372,30 @@ class TestArkProviderCache:
         provider.kwargs = {"temperature": 0.3}
         provider._prebuilt_system_prompt = None
         provider._prebuilt_batch_prompt = None
-        provider._context_id = None
+        provider._responses_route_disabled = False
+        provider._response_ids = {}
+        provider._response_prefix_keys = {}
+        provider._response_setup_locks = {}
 
         # Mock the async client with a delay to simulate network latency
         mock_client = MagicMock()
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "translated"
-        mock_response.usage = None
+        mock_response = {
+            "id": "resp-1",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "translated"}],
+                }
+            ],
+            "usage": None,
+        }
 
         async def slow_create(**kwargs):
             await asyncio.sleep(0.1)  # 100ms simulated latency
             return mock_response
 
-        mock_client.chat.completions.create = slow_create
+        mock_client.responses.create = slow_create
         provider.client = mock_client
 
         # Run 5 translations concurrently
@@ -417,21 +427,30 @@ class TestArkProviderCache:
         provider._cache_log_verbose = False
         provider._prebuilt_system_prompt = "FIXED_PROMPT"
         provider._prebuilt_batch_prompt = None
-        provider._context_id = "ctx-123"
-        provider._context_ids = {"individual": "ctx-123"}
+        provider._responses_route_disabled = False
+        provider._response_ids = {"individual": "resp-warm"}
+        provider._response_prefix_keys = {}
+        provider._response_setup_locks = {}
 
         mock_client = MagicMock()
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "translated"
-        mock_response.usage = {
-            "prompt_tokens": 2551,
-            "completion_tokens": 133,
-            "total_tokens": 2684,
-            "prompt_tokens_details": {"cached_tokens": 2535},
+        mock_response = {
+            "id": "resp-next",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "translated"}],
+                }
+            ],
+            "usage": {
+                "input_tokens": 2551,
+                "output_tokens": 133,
+                "total_tokens": 2684,
+                "input_tokens_details": {"cached_tokens": 2535},
+            },
         }
 
-        mock_client.context.completions.create = AsyncMock(return_value=mock_response)
+        mock_client.responses.create = AsyncMock(return_value=mock_response)
         provider.client = mock_client
 
         result = await provider.translate("hello", glossary_hints=None)
@@ -468,29 +487,45 @@ class TestArkProviderCache:
         provider._cache_log_verbose = False
         provider._prebuilt_system_prompt = None
         provider._prebuilt_batch_prompt = None
-        provider._context_id = None
-        provider._context_ids = {}
+        provider._responses_route_disabled = False
+        provider._response_ids = {}
+        provider._response_prefix_keys = {}
+        provider._response_setup_locks = {}
 
         mock_client = MagicMock()
-        hit_response = MagicMock()
-        hit_response.choices = [MagicMock()]
-        hit_response.choices[0].message.content = "hit"
-        hit_response.usage = {
-            "prompt_tokens": 100,
-            "completion_tokens": 20,
-            "total_tokens": 120,
-            "prompt_tokens_details": {"cached_tokens": 80},
+        hit_response = {
+            "id": "resp-hit",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "hit"}],
+                }
+            ],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+                "input_tokens_details": {"cached_tokens": 80},
+            },
         }
-        miss_response = MagicMock()
-        miss_response.choices = [MagicMock()]
-        miss_response.choices[0].message.content = "miss"
-        miss_response.usage = {
-            "prompt_tokens": 90,
-            "completion_tokens": 30,
-            "total_tokens": 120,
-            "prompt_tokens_details": {"cached_tokens": 0},
+        miss_response = {
+            "id": "resp-miss",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "miss"}],
+                }
+            ],
+            "usage": {
+                "input_tokens": 90,
+                "output_tokens": 30,
+                "total_tokens": 120,
+                "input_tokens_details": {"cached_tokens": 0},
+            },
         }
-        mock_client.chat.completions.create = AsyncMock(
+        mock_client.responses.create = AsyncMock(
             side_effect=[hit_response, miss_response]
         )
         provider.client = mock_client
@@ -518,15 +553,24 @@ class TestArkProviderCache:
         provider._cache_log_verbose = False
         provider._prebuilt_system_prompt = None
         provider._prebuilt_batch_prompt = None
-        provider._context_id = None
-        provider._context_ids = {}
+        provider._responses_route_disabled = False
+        provider._response_ids = {}
+        provider._response_prefix_keys = {}
+        provider._response_setup_locks = {}
 
         mock_client = MagicMock()
-        no_usage_response = MagicMock()
-        no_usage_response.choices = [MagicMock()]
-        no_usage_response.choices[0].message.content = "ok"
-        no_usage_response.usage = None
-        mock_client.chat.completions.create = AsyncMock(return_value=no_usage_response)
+        no_usage_response = {
+            "id": "resp-no-usage",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "ok"}],
+                }
+            ],
+            "usage": None,
+        }
+        mock_client.responses.create = AsyncMock(return_value=no_usage_response)
         provider.client = mock_client
 
         assert await provider.translate("hello") == "ok"
@@ -626,8 +670,8 @@ class TestArkProviderCache:
         call_kwargs = provider.prepare_prompt_cache_variants.call_args.kwargs
         assert call_kwargs["prompt_variants"] == ["batch", "individual"]
 
-    async def test_ark_translate_uses_variant_specific_context_id(self):
-        """ArkProvider should choose context_id by prompt_variant."""
+    async def test_ark_translate_uses_variant_specific_previous_response_id(self):
+        """ArkProvider should choose previous_response_id by prompt_variant."""
         from arxiv_translate.translator.ark_provider import ArkProvider
 
         provider = ArkProvider.__new__(ArkProvider)
@@ -636,15 +680,24 @@ class TestArkProviderCache:
         provider.kwargs = {"temperature": 0.0}
         provider._prebuilt_system_prompt = "INDIVIDUAL_PROMPT"
         provider._prebuilt_batch_prompt = "BATCH_PROMPT"
-        provider._context_ids = {"individual": "ctx-ind", "batch": "ctx-batch"}
-        provider._context_id = "ctx-ind"
+        provider._response_ids = {"individual": "resp-ind", "batch": "resp-batch"}
+        provider._response_prefix_keys = {}
+        provider._response_setup_locks = {}
+        provider._responses_route_disabled = False
 
         mock_client = MagicMock()
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "translated"
-        mock_response.usage = None
-        mock_client.context.completions.create = AsyncMock(return_value=mock_response)
+        mock_response = {
+            "id": "resp-batch-next",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "translated"}],
+                }
+            ],
+            "usage": None,
+        }
+        mock_client.responses.create = AsyncMock(return_value=mock_response)
         provider.client = mock_client
 
         result = await provider.translate(
@@ -654,11 +707,11 @@ class TestArkProviderCache:
         )
 
         assert result == "translated"
-        call_kwargs = mock_client.context.completions.create.call_args.kwargs
-        assert call_kwargs["context_id"] == "ctx-batch"
+        call_kwargs = mock_client.responses.create.call_args.kwargs
+        assert call_kwargs["previous_response_id"] == "resp-batch"
 
     async def test_ark_setup_context_caches_few_shot_prefix(self):
-        """ArkProvider setup_context should cache system + few-shot messages as prefix."""
+        """ArkProvider setup_context should warm responses cache with prefix messages."""
         from arxiv_translate.translator.ark_provider import ArkProvider
 
         provider = ArkProvider.__new__(ArkProvider)
@@ -667,26 +720,29 @@ class TestArkProviderCache:
         provider.kwargs = {"temperature": 0.0}
         provider._prebuilt_system_prompt = "INDIVIDUAL_PROMPT"
         provider._prebuilt_batch_prompt = "BATCH_PROMPT"
-        provider._context_ids = {}
-        provider._context_id = None
+        provider._response_ids = {}
+        provider._response_prefix_keys = {}
+        provider._response_setup_locks = {}
+        provider._responses_route_disabled = False
 
         mock_client = MagicMock()
-        mock_context = MagicMock()
-        mock_context.id = "ctx-ind"
-        mock_client.context.create = AsyncMock(return_value=mock_context)
+        mock_client.responses.create = AsyncMock(return_value={"id": "resp-ind"})
         provider.client = mock_client
 
         few_shot = [{"source": "A", "target": "甲"}]
         await provider.setup_context(prompt_variant="individual", few_shot_examples=few_shot)
 
-        create_kwargs = mock_client.context.create.call_args.kwargs
-        messages = create_kwargs["messages"]
+        create_kwargs = mock_client.responses.create.call_args.kwargs
+        messages = create_kwargs["input"]
         assert messages[0] == {"role": "system", "content": "INDIVIDUAL_PROMPT"}
         assert messages[1] == {"role": "user", "content": "A"}
         assert messages[2] == {"role": "assistant", "content": "甲"}
+        assert create_kwargs["caching"] == {"type": "enabled", "prefix": True}
+        assert create_kwargs["store"] is True
+        assert provider._response_ids["individual"] == "resp-ind"
 
-    async def test_ark_batch_context_rebuild_does_not_overwrite_individual_context(self):
-        """Rebuilding expired batch context should keep individual context_id intact."""
+    async def test_ark_invalid_previous_response_id_retries_without_overwriting_individual(self):
+        """Invalid batch previous_response_id should retry and keep individual response id intact."""
         from arxiv_translate.translator.ark_provider import ArkProvider
 
         provider = ArkProvider.__new__(ArkProvider)
@@ -695,28 +751,29 @@ class TestArkProviderCache:
         provider.kwargs = {"temperature": 0.0}
         provider._prebuilt_system_prompt = "INDIVIDUAL_PROMPT"
         provider._prebuilt_batch_prompt = "BATCH_PROMPT"
-        provider._context_ids = {"individual": "ctx-ind", "batch": "ctx-batch-old"}
-        provider._context_prefix_keys = {}
-        provider._context_setup_locks = {}
-        provider._context_id = "ctx-ind"
+        provider._response_ids = {"individual": "resp-ind", "batch": "resp-batch-old"}
+        provider._response_prefix_keys = {}
+        provider._response_setup_locks = {}
+        provider._responses_route_disabled = False
 
         mock_client = MagicMock()
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "translated"
-        mock_response.usage = None
 
-        async def context_completion_side_effect(**kwargs):
-            if kwargs["context_id"] == "ctx-batch-old":
-                raise RuntimeError("expired")
-            return mock_response
+        async def responses_side_effect(**kwargs):
+            if kwargs.get("previous_response_id") == "resp-batch-old":
+                raise RuntimeError("previous_response_id invalid")
+            return {
+                "id": "resp-batch-new",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "translated"}],
+                    }
+                ],
+                "usage": None,
+            }
 
-        mock_client.context.completions.create = AsyncMock(
-            side_effect=context_completion_side_effect
-        )
-        new_context = MagicMock()
-        new_context.id = "ctx-batch-new"
-        mock_client.context.create = AsyncMock(return_value=new_context)
+        mock_client.responses.create = AsyncMock(side_effect=responses_side_effect)
         provider.client = mock_client
 
         result = await provider.translate(
@@ -726,6 +783,73 @@ class TestArkProviderCache:
         )
 
         assert result == "translated"
-        assert provider._context_ids["batch"] == "ctx-batch-new"
-        assert provider._context_ids["individual"] == "ctx-ind"
-        assert provider._context_id == "ctx-ind"
+        assert provider._response_ids["batch"] == "resp-batch-new"
+        assert provider._response_ids["individual"] == "resp-ind"
+
+    async def test_ark_responses_route_unavailable_falls_back_to_chat_once(self, capsys):
+        """Route-unavailable errors should disable responses and fallback to chat once."""
+        from arxiv_translate.translator.ark_provider import ArkProvider
+
+        provider = ArkProvider.__new__(ArkProvider)
+        provider.model = "test-model"
+        provider.api_key = "test"
+        provider.kwargs = {"temperature": 0.0}
+        provider._prebuilt_system_prompt = None
+        provider._prebuilt_batch_prompt = None
+        provider._response_ids = {}
+        provider._response_prefix_keys = {}
+        provider._response_setup_locks = {}
+        provider._responses_route_disabled = False
+        provider._route_unavailable_warned = False
+        provider._prefix_too_short_warned_variants = set()
+        provider._response_fallback_warned_variants = set()
+
+        mock_client = MagicMock()
+        mock_client.responses.create = AsyncMock(
+            side_effect=RuntimeError("/responses route not found")
+        )
+        chat_response = MagicMock()
+        chat_response.choices = [MagicMock()]
+        chat_response.choices[0].message.content = "chat-fallback"
+        chat_response.usage = None
+        mock_client.chat.completions.create = AsyncMock(return_value=chat_response)
+        provider.client = mock_client
+
+        assert await provider.translate("first") == "chat-fallback"
+        assert await provider.translate("second") == "chat-fallback"
+
+        assert mock_client.responses.create.await_count == 1
+        assert mock_client.chat.completions.create.await_count == 2
+        out = capsys.readouterr().out
+        assert "responses_unavailable=True" in out
+
+    async def test_ark_prepare_prompt_cache_variants_prefix_too_short_disables_warmup(
+        self, capsys
+    ):
+        """Prefix-too-short errors should disable variant cache warmup and continue."""
+        from arxiv_translate.translator.ark_provider import ArkProvider
+
+        provider = ArkProvider.__new__(ArkProvider)
+        provider.model = "test-model"
+        provider.api_key = "test"
+        provider.kwargs = {"temperature": 0.0}
+        provider._prebuilt_system_prompt = "short prompt"
+        provider._prebuilt_batch_prompt = None
+        provider._response_ids = {}
+        provider._response_prefix_keys = {}
+        provider._response_setup_locks = {}
+        provider._responses_route_disabled = False
+        provider._route_unavailable_warned = False
+        provider._prefix_too_short_warned_variants = set()
+        provider._response_fallback_warned_variants = set()
+
+        mock_client = MagicMock()
+        mock_client.responses.create = AsyncMock(
+            side_effect=RuntimeError("input tokens must be greater than 256")
+        )
+        provider.client = mock_client
+
+        await provider.prepare_prompt_cache_variants(["individual"])
+        assert provider._prefix_cache_disabled_variants == {"individual"}
+        out = capsys.readouterr().out
+        assert "prefix_too_short=True" in out

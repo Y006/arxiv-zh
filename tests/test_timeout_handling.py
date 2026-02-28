@@ -343,3 +343,84 @@ class TestStateFileSkippedRecording:
 
         metadata_json = json.dumps(results[0].metadata)
         assert "skipped" in metadata_json
+
+
+class TestCancelledErrorRecovery:
+    """Test graceful handling for asyncio.CancelledError in concurrent path."""
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_chunk_is_skipped_not_raised(self):
+        """CancelledError from a single chunk should be converted to skipped chunk."""
+        mock_provider = AsyncMock()
+
+        async def mock_translate(
+            text,
+            context=None,
+            glossary_hints=None,
+            few_shot_examples=None,
+            custom_system_prompt=None,
+            prompt_variant="individual",
+        ):
+            if "boom" in text:
+                raise asyncio.CancelledError("simulated cancellation")
+            return f"翻译: {text}"
+
+        mock_provider.translate = mock_translate
+
+        pipeline = TranslationPipeline(
+            provider=mock_provider,
+            max_retries=1,
+            batch_short_threshold=0,  # force all chunks into long path
+        )
+        chunks = [
+            {"chunk_id": "c1", "content": "boom first chunk"},
+            {"chunk_id": "c2", "content": "normal second chunk"},
+            {"chunk_id": "c3", "content": "normal third chunk"},
+        ]
+
+        results = await pipeline.translate_document(chunks, max_concurrent=3)
+
+        assert len(results) == 3
+        assert results[0].metadata.get("skipped") is True
+        assert "cancel" in results[0].metadata.get("skip_reason", "").lower()
+        assert "翻译:" in results[1].translation
+        assert "翻译:" in results[2].translation
+
+    @pytest.mark.asyncio
+    async def test_batch_fallback_cancelled_error_is_converted_to_skip(self):
+        """CancelledError in batch fallback should not crash and should be skipped."""
+        mock_provider = AsyncMock()
+
+        async def mock_translate(
+            text,
+            context=None,
+            glossary_hints=None,
+            few_shot_examples=None,
+            custom_system_prompt=None,
+            prompt_variant="individual",
+        ):
+            if "cancel me" in text:
+                raise asyncio.CancelledError("fallback cancelled")
+            return f"翻译: {text}"
+
+        mock_provider.translate = mock_translate
+        pipeline = TranslationPipeline(
+            provider=mock_provider,
+            max_retries=1,
+            batch_short_threshold=100,
+            batch_max_chars=1000,
+        )
+
+        chunks = [
+            {"chunk_id": "c1", "content": "cancel me"},
+            {"chunk_id": "c2", "content": "keep translating"},
+        ]
+
+        # Force batch translation to fail so fallback path is exercised.
+        with patch.object(pipeline, "translate_batch", return_value=[]):
+            results = await pipeline.translate_document(chunks, max_concurrent=2)
+
+        assert len(results) == 2
+        assert results[0].metadata.get("skipped") is True
+        assert "cancel" in results[0].metadata.get("skip_reason", "").lower()
+        assert "翻译:" in results[1].translation

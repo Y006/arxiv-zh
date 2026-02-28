@@ -1,17 +1,17 @@
-"""Volcano Engine Ark provider with context API caching (HTTP implementation)."""
+"""Volcano Engine Ark provider with Responses API prefix caching."""
 
 import asyncio
-import datetime
 import json
+import time
 from types import SimpleNamespace
-from typing import Optional, Dict, List, Any, Set
+from typing import Optional, Dict, List, Any, Set, Tuple
 
 import httpx
 
 from .llm_base import LLMProvider
 from .prompts import build_system_prompt
 
-# Legacy compatibility flag. Ark provider is now HTTP-native and always available.
+# Legacy compatibility flag. Ark provider is HTTP-native and always available.
 HAS_ARK = True
 
 
@@ -23,57 +23,39 @@ def _to_namespace(value: Any) -> Any:
     return value
 
 
-class _ArkContextCompletionsAPI:
+class _ArkResponsesAPI:
     def __init__(self, client: "_ArkHTTPClient"):
         self._client = client
 
     async def create(
         self,
         *,
-        context_id: str,
         model: str,
-        messages: List[Dict[str, str]],
-        temperature: float,
+        input: List[Dict[str, Any]],
+        previous_response_id: Optional[str] = None,
+        caching: Optional[Dict[str, Any]] = None,
+        store: Optional[bool] = None,
+        expire_at: Optional[int] = None,
+        temperature: Optional[float] = None,
+        max_output_tokens: Optional[int] = None,
     ) -> Any:
-        return await self._client._post(
-            "/context/completions",
-            {
-                "context_id": context_id,
-                "model": model,
-                "messages": messages,
-                "temperature": temperature,
-            },
-        )
-
-
-class _ArkContextAPI:
-    def __init__(self, client: "_ArkHTTPClient"):
-        self._client = client
-        self.completions = _ArkContextCompletionsAPI(client)
-
-    async def create(
-        self,
-        *,
-        model: str,
-        mode: str,
-        messages: List[Dict[str, str]],
-        ttl: Any,
-    ) -> Any:
-        ttl_seconds: int
-        if isinstance(ttl, datetime.timedelta):
-            ttl_seconds = int(ttl.total_seconds())
-        else:
-            ttl_seconds = int(ttl)
-
-        return await self._client._post(
-            "/context/create",
-            {
-                "model": model,
-                "mode": mode,
-                "messages": messages,
-                "ttl": ttl_seconds,
-            },
-        )
+        body: Dict[str, Any] = {
+            "model": model,
+            "input": input,
+        }
+        if previous_response_id:
+            body["previous_response_id"] = previous_response_id
+        if caching is not None:
+            body["caching"] = caching
+        if store is not None:
+            body["store"] = store
+        if expire_at is not None:
+            body["expire_at"] = int(expire_at)
+        if temperature is not None:
+            body["temperature"] = temperature
+        if max_output_tokens is not None:
+            body["max_output_tokens"] = max_output_tokens
+        return await self._client._post("/responses", body)
 
 
 class _ArkChatCompletionsAPI:
@@ -114,7 +96,7 @@ class _ArkHTTPClient:
         self._http = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=60.0, read=300.0, write=60.0, pool=60.0)
         )
-        self.context = _ArkContextAPI(self)
+        self.responses = _ArkResponsesAPI(self)
         self.chat = _ArkChatAPI(self)
 
     async def _post(self, suffix: str, body: Dict[str, Any]) -> Any:
@@ -126,7 +108,7 @@ class _ArkHTTPClient:
 
 
 class ArkProvider(LLMProvider):
-    """Volcano Engine Ark provider using context API for system prompt caching."""
+    """Volcano Engine Ark provider using Responses API prefix caching."""
 
     def __init__(
         self,
@@ -141,11 +123,14 @@ class ArkProvider(LLMProvider):
 
         normalized_base_url = self._normalize_base_url(base_url)
         self.client = _ArkHTTPClient(base_url=normalized_base_url, api_key=api_key)
-        self._context_id: Optional[str] = None
-        self._context_ids: Dict[str, str] = {}
-        self._context_prefix_keys: Dict[str, str] = {}
-        self._context_setup_locks: Dict[str, asyncio.Lock] = {}
-        self._context_fallback_warned_variants: Set[str] = set()
+        self._response_ids: Dict[str, str] = {}
+        self._response_prefix_keys: Dict[str, str] = {}
+        self._response_setup_locks: Dict[str, asyncio.Lock] = {}
+        self._response_fallback_warned_variants: Set[str] = set()
+        self._prefix_too_short_warned_variants: Set[str] = set()
+        self._prefix_cache_disabled_variants: Set[str] = set()
+        self._responses_route_disabled = False
+        self._route_unavailable_warned = False
         self._prebuilt_system_prompt: Optional[str] = None
         self._prebuilt_batch_prompt: Optional[str] = None
         self._cache_log_verbose = bool(self.kwargs.get("ark_cache_log_verbose", False))
@@ -154,8 +139,10 @@ class ArkProvider(LLMProvider):
     @staticmethod
     def _normalize_base_url(base_url: str) -> str:
         normalized = base_url.rstrip("/")
-        if normalized.endswith("/chat/completions"):
-            normalized = normalized[: -len("/chat/completions")]
+        for suffix in ("/responses", "/chat/completions"):
+            if normalized.endswith(suffix):
+                normalized = normalized[: -len(suffix)]
+                break
         return normalized.rstrip("/")
 
     @staticmethod
@@ -166,25 +153,41 @@ class ArkProvider(LLMProvider):
             return obj.get(key, default)
         return getattr(obj, key, default)
 
-    def _ensure_context_state(self) -> None:
-        if not hasattr(self, "_context_ids") or self._context_ids is None:  # type: ignore[attr-defined]
-            self._context_ids = {}
-        if not hasattr(self, "_context_prefix_keys") or self._context_prefix_keys is None:  # type: ignore[attr-defined]
-            self._context_prefix_keys = {}
+    def _ensure_response_state(self) -> None:
         if (
-            not hasattr(self, "_context_setup_locks")
-            or self._context_setup_locks is None  # type: ignore[attr-defined]
+            not hasattr(self, "_response_ids")
+            or self._response_ids is None  # type: ignore[attr-defined]
         ):
-            self._context_setup_locks = {}
+            self._response_ids = {}
         if (
-            not hasattr(self, "_context_fallback_warned_variants")
-            or self._context_fallback_warned_variants is None  # type: ignore[attr-defined]
+            not hasattr(self, "_response_prefix_keys")
+            or self._response_prefix_keys is None  # type: ignore[attr-defined]
         ):
-            self._context_fallback_warned_variants = set()
-
-        legacy_context_id = getattr(self, "_context_id", None)
-        if legacy_context_id and "individual" not in self._context_ids:
-            self._context_ids["individual"] = legacy_context_id
+            self._response_prefix_keys = {}
+        if (
+            not hasattr(self, "_response_setup_locks")
+            or self._response_setup_locks is None  # type: ignore[attr-defined]
+        ):
+            self._response_setup_locks = {}
+        if (
+            not hasattr(self, "_response_fallback_warned_variants")
+            or self._response_fallback_warned_variants is None  # type: ignore[attr-defined]
+        ):
+            self._response_fallback_warned_variants = set()
+        if (
+            not hasattr(self, "_prefix_too_short_warned_variants")
+            or self._prefix_too_short_warned_variants is None  # type: ignore[attr-defined]
+        ):
+            self._prefix_too_short_warned_variants = set()
+        if (
+            not hasattr(self, "_prefix_cache_disabled_variants")
+            or self._prefix_cache_disabled_variants is None  # type: ignore[attr-defined]
+        ):
+            self._prefix_cache_disabled_variants = set()
+        if not hasattr(self, "_responses_route_disabled"):
+            self._responses_route_disabled = False
+        if not hasattr(self, "_route_unavailable_warned"):
+            self._route_unavailable_warned = False
 
     def _ensure_cache_stats_state(self) -> None:
         if not hasattr(self, "_cache_log_verbose"):
@@ -204,7 +207,7 @@ class ArkProvider(LLMProvider):
             "completion_tokens_total": 0,
             "total_tokens_total": 0,
             "missing_usage_count": 0,
-            "mode_counts": {"context": 0, "chat": 0},
+            "mode_counts": {"responses": 0, "chat": 0},
             "variant_counts": {},
         }
 
@@ -259,7 +262,9 @@ class ArkProvider(LLMProvider):
         request_count = self._stat_int(self._cache_stats.get("request_count", 0))
         cache_hit_count = self._stat_int(self._cache_stats.get("cache_hit_count", 0))
         cache_miss_count = self._stat_int(self._cache_stats.get("cache_miss_count", 0))
-        cache_hit_rate = round((cache_hit_count / request_count) * 100, 1) if request_count else 0.0
+        cache_hit_rate = (
+            round((cache_hit_count / request_count) * 100, 1) if request_count else 0.0
+        )
 
         return {
             "provider": "ark",
@@ -325,29 +330,32 @@ class ArkProvider(LLMProvider):
 
         return lines
 
-    def _get_context_id_for_variant(self, prompt_variant: str) -> Optional[str]:
-        self._ensure_context_state()
-        return self._context_ids.get(prompt_variant)
+    def _get_response_id_for_variant(self, prompt_variant: str) -> Optional[str]:
+        self._ensure_response_state()
+        return self._response_ids.get(prompt_variant)
 
-    def _set_context_id_for_variant(
+    def _set_response_id_for_variant(
         self,
         prompt_variant: str,
-        context_id: str,
+        response_id: str,
         prefix_key: Optional[str] = None,
     ) -> None:
-        self._ensure_context_state()
-        self._context_ids[prompt_variant] = context_id
+        self._ensure_response_state()
+        self._response_ids[prompt_variant] = response_id
         if prefix_key is not None:
-            self._context_prefix_keys[prompt_variant] = prefix_key
-        if prompt_variant == "individual":
-            self._context_id = context_id
+            self._response_prefix_keys[prompt_variant] = prefix_key
 
-    def _get_context_lock(self, prompt_variant: str) -> asyncio.Lock:
-        self._ensure_context_state()
-        lock = self._context_setup_locks.get(prompt_variant)
+    def _clear_response_id_for_variant(self, prompt_variant: str) -> None:
+        self._ensure_response_state()
+        self._response_ids.pop(prompt_variant, None)
+        self._response_prefix_keys.pop(prompt_variant, None)
+
+    def _get_response_lock(self, prompt_variant: str) -> asyncio.Lock:
+        self._ensure_response_state()
+        lock = self._response_setup_locks.get(prompt_variant)
         if lock is None:
             lock = asyncio.Lock()
-            self._context_setup_locks[prompt_variant] = lock
+            self._response_setup_locks[prompt_variant] = lock
         return lock
 
     @staticmethod
@@ -394,7 +402,7 @@ class ArkProvider(LLMProvider):
                         parts.append(item)
                         continue
                     item_type = ArkProvider._get_field(item, "type", "")
-                    if item_type == "text":
+                    if item_type in ("output_text", "text"):
                         parts.append(str(ArkProvider._get_field(item, "text", "")))
                         continue
                     text_value = ArkProvider._get_field(item, "text", None)
@@ -403,19 +411,111 @@ class ArkProvider(LLMProvider):
                 return "".join(parts)
             return str(content)
 
+        output_text = ArkProvider._get_field(response, "output_text", None)
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
+
+        response_text = ArkProvider._get_field(response, "text", None)
+        if isinstance(response_text, str) and response_text.strip():
+            return response_text.strip()
+
+        output_items = ArkProvider._get_field(response, "output", []) or []
+        for item in output_items:
+            role = ArkProvider._get_field(item, "role", "")
+            item_type = ArkProvider._get_field(item, "type", "")
+            if role and role != "assistant":
+                continue
+            if item_type not in ("", "message"):
+                continue
+            content = ArkProvider._get_field(item, "content", None)
+            text = _content_to_text(content)
+            if text.strip():
+                return text.strip()
+
         choices = ArkProvider._get_field(response, "choices", []) or []
-        if not choices:
-            return ""
-        message = ArkProvider._get_field(choices[0], "message", {})
-        content = ArkProvider._get_field(message, "content", "")
-        return _content_to_text(content).strip()
+        if choices:
+            message = ArkProvider._get_field(choices[0], "message", {})
+            content = ArkProvider._get_field(message, "content", "")
+            return _content_to_text(content).strip()
+
+        return ""
+
+    @staticmethod
+    def _extract_error_payload(error: Any) -> Tuple[Optional[int], Dict[str, Any], str]:
+        status_code: Optional[int] = None
+        payload: Dict[str, Any] = {}
+        if isinstance(error, httpx.HTTPStatusError) and error.response is not None:
+            status_code = error.response.status_code
+            try:
+                decoded = error.response.json()
+                if isinstance(decoded, dict):
+                    payload = decoded
+            except Exception:
+                payload = {}
+        message = " ".join(str(error).split())
+        return status_code, payload, message.lower()
+
+    @staticmethod
+    def _is_invalid_previous_response_id_error(error: Any) -> bool:
+        _, payload, msg = ArkProvider._extract_error_payload(error)
+        err_obj = payload.get("error", {}) if isinstance(payload, dict) else {}
+        if isinstance(err_obj, dict):
+            param = str(err_obj.get("param", "")).lower()
+            if param == "previous_response_id":
+                return True
+            err_msg = str(err_obj.get("message", "")).lower()
+            if "previous_response_id" in err_msg and (
+                "invalid" in err_msg or "expired" in err_msg or "not found" in err_msg
+            ):
+                return True
+        return "previous_response_id" in msg and (
+            "invalid" in msg or "expired" in msg or "not found" in msg
+        )
+
+    @staticmethod
+    def _is_responses_route_unavailable_error(error: Any) -> bool:
+        status_code, payload, msg = ArkProvider._extract_error_payload(error)
+        err_obj = payload.get("error", {}) if isinstance(payload, dict) else {}
+        err_param = ""
+        err_msg = ""
+        if isinstance(err_obj, dict):
+            err_param = str(err_obj.get("param", "")).lower()
+            err_msg = str(err_obj.get("message", "")).lower()
+        if status_code == 404 and (
+            "responses" in msg or "responses" in err_msg or "route" in msg
+        ):
+            return True
+        return "/responses" in msg and (
+            "not found" in msg or "unsupported" in msg or "not support" in msg
+        ) or ("responses" in err_param and "not found" in err_msg)
+
+    @staticmethod
+    def _is_prefix_cache_token_too_short_error(error: Any) -> bool:
+        _, payload, msg = ArkProvider._extract_error_payload(error)
+        err_obj = payload.get("error", {}) if isinstance(payload, dict) else {}
+        err_msg = ""
+        if isinstance(err_obj, dict):
+            err_msg = str(err_obj.get("message", "")).lower()
+        merged = f"{msg} {err_msg}"
+        if (
+            "prefix" in merged
+            and "cache" in merged
+            and "256" in merged
+            and ("token" in merged or "tokens" in merged)
+        ):
+            return True
+        return (
+            "input" in merged
+            and "token" in merged
+            and "greater than 256" in merged
+        )
 
     def _extract_cache_meta(
         self,
         response: Any,
-        use_context: bool,
+        mode: str,
         prompt_variant: str,
-        context_id: Optional[str],
+        response_id: Optional[str],
     ) -> Optional[Dict[str, Any]]:
         def _to_int(value: Any) -> int:
             try:
@@ -431,18 +531,34 @@ class ArkProvider(LLMProvider):
         if usage is None:
             return None
 
-        prompt_tokens = _to_int(self._get_field(usage, "prompt_tokens", 0))
-        completion_tokens = _to_int(self._get_field(usage, "completion_tokens", 0))
+        prompt_tokens = _to_int(
+            self._get_field(
+                usage,
+                "prompt_tokens",
+                self._get_field(usage, "input_tokens", 0),
+            )
+        )
+        completion_tokens = _to_int(
+            self._get_field(
+                usage,
+                "completion_tokens",
+                self._get_field(usage, "output_tokens", 0),
+            )
+        )
         total_tokens = _to_int(self._get_field(usage, "total_tokens", 0))
 
-        prompt_details = self._get_field(usage, "prompt_tokens_details", None)
+        prompt_details = self._get_field(
+            usage,
+            "prompt_tokens_details",
+            self._get_field(usage, "input_tokens_details", None),
+        )
         cached_tokens = _to_int(self._get_field(prompt_details, "cached_tokens", 0))
 
         return {
             "provider": "ark",
-            "mode": "context" if use_context else "chat",
+            "mode": mode,
             "variant": prompt_variant,
-            "context_id": context_id,
+            "response_id": response_id,
             "cache_hit": cached_tokens > 0,
             "cached_tokens": cached_tokens,
             "prompt_tokens": prompt_tokens,
@@ -461,18 +577,40 @@ class ArkProvider(LLMProvider):
             f"prompt_tokens={cache_meta.get('prompt_tokens')} "
             f"completion_tokens={cache_meta.get('completion_tokens')} "
             f"total_tokens={cache_meta.get('total_tokens')} "
-            f"context_id={cache_meta.get('context_id')}"
+            f"response_id={cache_meta.get('response_id')}"
         )
 
-    def _warn_context_fallback_once(self, prompt_variant: str, reason: Any) -> None:
-        self._ensure_context_state()
-        if prompt_variant in self._context_fallback_warned_variants:
+    def _warn_response_fallback_once(self, prompt_variant: str, reason: Any) -> None:
+        self._ensure_response_state()
+        if prompt_variant in self._response_fallback_warned_variants:
             return
-        self._context_fallback_warned_variants.add(prompt_variant)
+        self._response_fallback_warned_variants.add(prompt_variant)
         reason_text = " ".join(str(reason).split())
         print(
             "[ARK CACHE] "
             f"variant={prompt_variant} mode=chat fallback=True reason={reason_text}"
+        )
+
+    def _warn_responses_unavailable_once(self, reason: Any) -> None:
+        self._ensure_response_state()
+        if self._route_unavailable_warned:
+            return
+        self._route_unavailable_warned = True
+        reason_text = " ".join(str(reason).split())
+        print(
+            "[ARK CACHE] "
+            f"mode=chat responses_unavailable=True reason={reason_text}"
+        )
+
+    def _warn_prefix_too_short_once(self, prompt_variant: str, reason: Any) -> None:
+        self._ensure_response_state()
+        if prompt_variant in self._prefix_too_short_warned_variants:
+            return
+        self._prefix_too_short_warned_variants.add(prompt_variant)
+        reason_text = " ".join(str(reason).split())
+        print(
+            "[ARK CACHE] "
+            f"variant={prompt_variant} mode=responses prefix_too_short=True reason={reason_text}"
         )
 
     def _build_chat_messages(
@@ -510,8 +648,11 @@ class ArkProvider(LLMProvider):
         prompt_variant: str = "individual",
         few_shot_examples: Optional[List[Dict[str, str]]] = None,
     ) -> None:
-        """Create a cached context with the stable prefix (system + few-shot)."""
-        self._ensure_context_state()
+        """Warm responses prefix cache with stable prefix (system + few-shot)."""
+        self._ensure_response_state()
+        if self._responses_route_disabled:
+            return
+
         prefix_messages = self._build_context_prefix_messages(
             prompt_variant=prompt_variant,
             few_shot_examples=few_shot_examples,
@@ -519,28 +660,41 @@ class ArkProvider(LLMProvider):
         )
         if not prefix_messages:
             return
+        if prompt_variant in self._prefix_cache_disabled_variants:
+            return
 
         prefix_key = self._build_prefix_key(prefix_messages)
-        async with self._get_context_lock(prompt_variant):
-            current_context_id = self._context_ids.get(prompt_variant)
-            current_prefix_key = self._context_prefix_keys.get(prompt_variant)
-            if current_context_id and current_prefix_key == prefix_key:
+        async with self._get_response_lock(prompt_variant):
+            current_response_id = self._response_ids.get(prompt_variant)
+            current_prefix_key = self._response_prefix_keys.get(prompt_variant)
+            if current_response_id and current_prefix_key == prefix_key:
                 return
 
-            context = await self.client.context.create(
-                model=self.model,
-                mode="common_prefix",
-                messages=prefix_messages,
-                ttl=datetime.timedelta(minutes=5),
-            )
-            context_id = self._get_field(context, "id") or self._get_field(
-                context, "context_id"
-            )
-            if not context_id:
-                raise RuntimeError("Ark context.create response missing context id")
-            self._set_context_id_for_variant(
+            try:
+                response = await self.client.responses.create(
+                    model=self.model,
+                    input=prefix_messages,
+                    caching={"type": "enabled", "prefix": True},
+                    store=True,
+                    expire_at=int(time.time()) + 3600,
+                )
+            except Exception as e:
+                if self._is_prefix_cache_token_too_short_error(e):
+                    self._prefix_cache_disabled_variants.add(prompt_variant)
+                    self._warn_prefix_too_short_once(prompt_variant, e)
+                    return
+                if self._is_responses_route_unavailable_error(e):
+                    self._responses_route_disabled = True
+                    self._warn_responses_unavailable_once(e)
+                    return
+                raise
+
+            response_id = self._get_field(response, "id")
+            if not response_id:
+                raise RuntimeError("Ark responses.create warmup missing response id")
+            self._set_response_id_for_variant(
                 prompt_variant=prompt_variant,
-                context_id=str(context_id),
+                response_id=str(response_id),
                 prefix_key=prefix_key,
             )
 
@@ -563,6 +717,30 @@ class ArkProvider(LLMProvider):
                     f"warmup_failed=True reason={e}"
                 )
 
+    async def _call_chat_completions(
+        self,
+        *,
+        text: str,
+        context: Optional[str],
+        glossary_hints: Optional[Dict[str, str]],
+        few_shot_examples: Optional[List[Dict[str, str]]],
+        custom_system_prompt: Optional[str],
+        prompt_variant: str,
+    ) -> Any:
+        chat_messages = self._build_chat_messages(
+            text=text,
+            context=context,
+            glossary_hints=glossary_hints,
+            few_shot_examples=few_shot_examples,
+            custom_system_prompt=custom_system_prompt,
+            prompt_variant=prompt_variant,
+        )
+        return await self.client.chat.completions.create(
+            model=self.model,
+            messages=chat_messages,
+            temperature=self.kwargs.get("temperature", 0.3),
+        )
+
     async def translate(
         self,
         text: str,
@@ -572,77 +750,21 @@ class ArkProvider(LLMProvider):
         custom_system_prompt: Optional[str] = None,
         prompt_variant: str = "individual",
     ) -> str:
-        self._ensure_context_state()
+        self._ensure_response_state()
         selected_prebuilt_prompt = self._get_prebuilt_prompt(prompt_variant)
-        current_context_id = self._get_context_id_for_variant(prompt_variant)
-        user_message = {"role": "user", "content": text}
-
-        use_context = (
+        can_use_prev_response = (
             selected_prebuilt_prompt is not None
             and glossary_hints is None
-            and current_context_id is not None
+            and prompt_variant not in self._prefix_cache_disabled_variants
         )
 
-        context_messages: List[Dict[str, str]] = [user_message]
+        used_mode = "chat"
+        active_response_id: Optional[str] = None
 
         try:
-            used_context = False
             response: Any
-            if use_context:
-                try:
-                    response = await self.client.context.completions.create(
-                        context_id=current_context_id or "",
-                        model=self.model,
-                        messages=context_messages,
-                        temperature=self.kwargs.get("temperature", 0.3),
-                    )
-                    used_context = True
-                except Exception as first_context_error:
-                    try:
-                        await self.setup_context(
-                            prompt_variant=prompt_variant,
-                            few_shot_examples=few_shot_examples,
-                        )
-                    except Exception:
-                        # If context rebuild fails, we will fallback to chat path.
-                        pass
-
-                    current_context_id = self._get_context_id_for_variant(prompt_variant)
-                    if current_context_id:
-                        try:
-                            response = await self.client.context.completions.create(
-                                context_id=current_context_id,
-                                model=self.model,
-                                messages=context_messages,
-                                temperature=self.kwargs.get("temperature", 0.3),
-                            )
-                            used_context = True
-                        except Exception as second_context_error:
-                            self._warn_context_fallback_once(
-                                prompt_variant,
-                                f"{first_context_error}; {second_context_error}",
-                            )
-                    else:
-                        self._warn_context_fallback_once(
-                            prompt_variant, first_context_error
-                        )
-
-                    if not used_context:
-                        chat_messages = self._build_chat_messages(
-                            text=text,
-                            context=context,
-                            glossary_hints=glossary_hints,
-                            few_shot_examples=few_shot_examples,
-                            custom_system_prompt=custom_system_prompt,
-                            prompt_variant=prompt_variant,
-                        )
-                        response = await self.client.chat.completions.create(
-                            model=self.model,
-                            messages=chat_messages,
-                            temperature=self.kwargs.get("temperature", 0.3),
-                        )
-            else:
-                chat_messages = self._build_chat_messages(
+            if self._responses_route_disabled:
+                response = await self._call_chat_completions(
                     text=text,
                     context=context,
                     glossary_hints=glossary_hints,
@@ -650,20 +772,79 @@ class ArkProvider(LLMProvider):
                     custom_system_prompt=custom_system_prompt,
                     prompt_variant=prompt_variant,
                 )
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=chat_messages,
-                    temperature=self.kwargs.get("temperature", 0.3),
+            else:
+                responses_input = self._build_chat_messages(
+                    text=text,
+                    context=context,
+                    glossary_hints=glossary_hints,
+                    few_shot_examples=few_shot_examples,
+                    custom_system_prompt=custom_system_prompt,
+                    prompt_variant=prompt_variant,
                 )
 
-            active_context_id = (
-                self._get_context_id_for_variant(prompt_variant) if used_context else None
-            )
+                request_kwargs: Dict[str, Any] = {
+                    "model": self.model,
+                    "input": responses_input,
+                    "temperature": self.kwargs.get("temperature", 0.3),
+                }
+                previous_response_id = (
+                    self._get_response_id_for_variant(prompt_variant)
+                    if can_use_prev_response
+                    else None
+                )
+                if previous_response_id:
+                    request_kwargs["previous_response_id"] = previous_response_id
+
+                try:
+                    response = await self.client.responses.create(**request_kwargs)
+                    used_mode = "responses"
+                except Exception as first_error:
+                    recovered = False
+                    if (
+                        request_kwargs.get("previous_response_id")
+                        and self._is_invalid_previous_response_id_error(first_error)
+                    ):
+                        self._clear_response_id_for_variant(prompt_variant)
+                        retry_kwargs = dict(request_kwargs)
+                        retry_kwargs.pop("previous_response_id", None)
+                        try:
+                            response = await self.client.responses.create(**retry_kwargs)
+                            used_mode = "responses"
+                            recovered = True
+                        except Exception as second_error:
+                            first_error = second_error
+
+                    if not recovered:
+                        if self._is_responses_route_unavailable_error(first_error):
+                            self._responses_route_disabled = True
+                            self._warn_responses_unavailable_once(first_error)
+                        else:
+                            self._warn_response_fallback_once(
+                                prompt_variant, first_error
+                            )
+                        response = await self._call_chat_completions(
+                            text=text,
+                            context=context,
+                            glossary_hints=glossary_hints,
+                            few_shot_examples=few_shot_examples,
+                            custom_system_prompt=custom_system_prompt,
+                            prompt_variant=prompt_variant,
+                        )
+
+            if used_mode == "responses":
+                response_id = self._get_field(response, "id")
+                if response_id and can_use_prev_response:
+                    self._set_response_id_for_variant(
+                        prompt_variant=prompt_variant,
+                        response_id=str(response_id),
+                    )
+                active_response_id = str(response_id) if response_id else None
+
             cache_meta = self._extract_cache_meta(
                 response=response,
-                use_context=used_context,
+                mode=used_mode,
                 prompt_variant=prompt_variant,
-                context_id=active_context_id,
+                response_id=active_response_id,
             )
             self._last_cache_meta = cache_meta
             self._record_cache_meta(cache_meta)
@@ -683,5 +864,5 @@ class ArkProvider(LLMProvider):
         return self._extract_message_content(response)
 
     def estimate_tokens(self, text: str) -> int:
-        # Heuristic: mixed CJK/English ~2.5 chars per token
+        # Heuristic: mixed CJK/English ~2.5 chars per token.
         return int(len(text) / 2.5)

@@ -78,6 +78,9 @@ Notes:
 - When `sdk` is not null, `key` is required (or provide `--key` on the CLI).
 - Ark endpoint auto-routing is enabled when host matches `ark.*.volces.com`.
   Use openai-style sdk (`openai`, `openai-coding`, or `null`) + Ark endpoint.
+  Ark route prefers `/responses` with prefix cache warmup and `previous_response_id` reuse.
+  If `/responses` is unavailable or prefix cache preconditions are not met (e.g. short prefix),
+  it automatically falls back to `chat/completions` without stopping the translation job.
   `sdk=ark` is no longer supported.
 
 ### Compilation Settings

@@ -715,6 +715,14 @@ class TranslationPipeline:
         progress_lock = asyncio.Lock()
         total_pending = len(translatable_chunks)
 
+        def _is_fatal_base_exception(error: BaseException) -> bool:
+            return isinstance(error, (KeyboardInterrupt, SystemExit))
+
+        def _is_recoverable_task_error(result: Any) -> bool:
+            return isinstance(result, BaseException) and not _is_fatal_base_exception(
+                result
+            )
+
         async def translate_batch_with_semaphore(
             batch_chunks: List[Dict[str, str]],
             batch_index: int,
@@ -729,7 +737,9 @@ class TranslationPipeline:
                         chunks=batch_chunks,
                         context=context,
                     )
-                except Exception:
+                except BaseException as e:
+                    if _is_fatal_base_exception(e):
+                        raise
                     batch_results = []
 
             # Exit semaphore block before fallback to allow other tasks to proceed
@@ -743,7 +753,7 @@ class TranslationPipeline:
                 )
                 # Convert exceptions to skipped chunks with original text
                 for i, result in enumerate(fallback_results):
-                    if isinstance(result, Exception):
+                    if _is_recoverable_task_error(result):
                         chunk_data = batch_chunks[i]
                         skipped_chunk = TranslatedChunk(
                             source=chunk_data["content"],
@@ -759,6 +769,8 @@ class TranslationPipeline:
                             },
                         )
                         batch_results.append(skipped_chunk)
+                    elif isinstance(result, BaseException):
+                        raise result
                     else:
                         batch_results.append(cast(TranslatedChunk, result))
 
@@ -798,7 +810,9 @@ class TranslationPipeline:
                                 pass
 
                     return result
-            except Exception as e:
+            except BaseException as e:
+                if _is_fatal_base_exception(e):
+                    raise
                 # Return skipped chunk with original text on any error
                 skipped_chunk = TranslatedChunk(
                     source=chunk_data["content"],
@@ -819,24 +833,31 @@ class TranslationPipeline:
                             pass
                 return skipped_chunk
 
-        batch_tasks = [
-            translate_batch_with_semaphore(batch, i) for i, batch in enumerate(batches)
+        batch_task_factories = [
+            (lambda b=batch, idx=i: translate_batch_with_semaphore(b, idx))
+            for i, batch in enumerate(batches)
         ]
-        long_tasks = [translate_with_semaphore(c) for c in long_chunks]
-
-        all_tasks = batch_tasks + long_tasks
+        long_task_factories = [
+            (lambda chunk=c: translate_with_semaphore(chunk)) for c in long_chunks
+        ]
+        all_task_factories = batch_task_factories + long_task_factories
 
         # Cache warmup: send the first request alone to establish prefix cache
         # on the server side, then concurrently send remaining requests.
-        if all_tasks:
+        if all_task_factories:
             try:
-                first_result = await all_tasks[0]
-            except Exception as e:
+                first_result = await all_task_factories[0]()
+            except BaseException as e:
+                if _is_fatal_base_exception(e):
+                    raise
                 first_result = e
 
-            if len(all_tasks) > 1:
+            if len(all_task_factories) > 1:
+                remaining_tasks = [
+                    task_factory() for task_factory in all_task_factories[1:]
+                ]
                 remaining_results = await asyncio.gather(
-                    *all_tasks[1:], return_exceptions=True
+                    *remaining_tasks, return_exceptions=True
                 )
                 results = [first_result] + list(remaining_results)
             else:
@@ -846,7 +867,7 @@ class TranslationPipeline:
 
         skipped_count = 0
         for i, result in enumerate(results):
-            if isinstance(result, Exception):
+            if _is_recoverable_task_error(result):
                 # Convert exception to graceful skip with original text
                 if i < len(batches):
                     batch = batches[i]
@@ -883,6 +904,8 @@ class TranslationPipeline:
                     state["results"].append(skipped_chunk.model_dump())
                     skipped_count += 1
                 continue
+            if isinstance(result, BaseException):
+                raise result
 
             if i < len(batches):
                 batch_results = cast(List[TranslatedChunk], result)

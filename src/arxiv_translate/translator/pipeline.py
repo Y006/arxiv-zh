@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, List, Any, Union, Callable, cast
+from typing import Optional, Dict, List, Any, Union, Callable, Set, cast
 
 from pydantic import BaseModel, Field
 
@@ -35,6 +35,14 @@ class TranslationPipeline:
     NEWLINE_PARA_RAW_TOKEN = "[[PL_RAW]]"
     NEWLINE_SOFT_RAW_SENTINEL = "[[__ARXIV_TRANSLATE_SL_RAW__]]"
     NEWLINE_PARA_RAW_SENTINEL = "[[__ARXIV_TRANSLATE_PL_RAW__]]"
+    PLACEHOLDER_RETRY_MAX_ATTEMPTS = 3
+    PLACEHOLDER_AUDIT_PATTERN = re.compile(r"\[\[[A-Z_]+_\d+\]\]")
+    PLACEHOLDER_AUDIT_WHITELIST = {
+        NEWLINE_SOFT_TOKEN,
+        NEWLINE_PARA_TOKEN,
+        NEWLINE_SOFT_RAW_TOKEN,
+        NEWLINE_PARA_RAW_TOKEN,
+    }
 
     def __init__(
         self,
@@ -205,6 +213,26 @@ class TranslationPipeline:
             "llm_sl_token_count": llm_sl_token_count,
             "llm_pl_token_count": llm_pl_token_count,
             "newline_warning": " | ".join(warning_parts),
+        }
+
+    def _extract_placeholders_for_audit(self, text: str) -> Set[str]:
+        return {
+            token
+            for token in self.PLACEHOLDER_AUDIT_PATTERN.findall(text or "")
+            if token not in self.PLACEHOLDER_AUDIT_WHITELIST
+        }
+
+    def _audit_placeholder_alignment(
+        self, source: str, translation: str
+    ) -> Dict[str, Any]:
+        source_placeholders = self._extract_placeholders_for_audit(source)
+        translated_placeholders = self._extract_placeholders_for_audit(translation)
+        missing = sorted(source_placeholders - translated_placeholders)
+        spurious = sorted(translated_placeholders - source_placeholders)
+        return {
+            "passed": not missing and not spurious,
+            "missing": missing,
+            "spurious": spurious,
         }
 
     async def _call_with_retry(
@@ -634,6 +662,271 @@ class TranslationPipeline:
         if batch_stats_callback:
             batch_stats_callback(len(batches), len(long_chunks), total_api_calls)
 
+        translatable_chunk_map = {
+            chunk_data["chunk_id"]: chunk_data for chunk_data in translatable_chunks
+        }
+        translatable_ids = [chunk_data["chunk_id"] for chunk_data in translatable_chunks]
+
+        def _split_for_retry_round(
+            retry_chunks: List[Dict[str, str]],
+        ) -> tuple[List[List[Dict[str, str]]], List[Dict[str, str]]]:
+            short_retry: List[Dict[str, str]] = []
+            long_retry: List[Dict[str, str]] = []
+            for chunk_data in retry_chunks:
+                if len(chunk_data["content"]) < SHORT_THRESHOLD:
+                    short_retry.append(chunk_data)
+                else:
+                    long_retry.append(chunk_data)
+
+            retry_batches: List[List[Dict[str, str]]] = []
+            current_batch: List[Dict[str, str]] = []
+            current_len = 0
+            for chunk_data in short_retry:
+                chunk_len = len(chunk_data["content"])
+                if current_len + chunk_len > MAX_BATCH_CHARS and current_batch:
+                    retry_batches.append(current_batch)
+                    current_batch = []
+                    current_len = 0
+                current_batch.append(chunk_data)
+                current_len += chunk_len
+            if current_batch:
+                retry_batches.append(current_batch)
+
+            return retry_batches, long_retry
+
+        async def _translate_retry_round(
+            retry_chunks: List[Dict[str, str]],
+            round_index: int,
+        ) -> Dict[str, TranslatedChunk]:
+            if not retry_chunks:
+                return {}
+
+            retry_batches, retry_long_chunks = _split_for_retry_round(retry_chunks)
+            round_results: Dict[str, TranslatedChunk] = {}
+
+            def _make_skipped_chunk(chunk_data: Dict[str, str], error: Any) -> TranslatedChunk:
+                return TranslatedChunk(
+                    source=chunk_data["content"],
+                    translation=chunk_data["content"],
+                    chunk_id=chunk_data["chunk_id"],
+                    metadata={
+                        "skipped": True,
+                        "skip_reason": str(error),
+                        "skipped_at": datetime.now().isoformat(),
+                        "retry_round": round_index,
+                    },
+                )
+
+            if self.sequential_mode:
+                for i, batch in enumerate(retry_batches):
+                    batch_id = f"retry_r{round_index}_batch_{i}"
+                    try:
+                        batch_results = await self.translate_batch(
+                            chunks=batch,
+                            context=context,
+                        )
+                    except Exception:
+                        batch_results = []
+
+                    if not batch_results:
+                        batch_results = []
+                        for chunk_data in batch:
+                            try:
+                                chunk_result = await self.translate_chunk(
+                                    chunk=chunk_data["content"],
+                                    chunk_id=chunk_data["chunk_id"],
+                                    context=context,
+                                )
+                            except Exception as e:
+                                chunk_result = _make_skipped_chunk(chunk_data, e)
+                            batch_results.append(chunk_result)
+
+                    for chunk_result in batch_results:
+                        chunk_result.metadata["batch_id"] = batch_id
+                        chunk_result.metadata["retry_round"] = round_index
+                        round_results[chunk_result.chunk_id] = chunk_result
+
+                for chunk_data in retry_long_chunks:
+                    try:
+                        chunk_result = await self.translate_chunk(
+                            chunk=chunk_data["content"],
+                            chunk_id=chunk_data["chunk_id"],
+                            context=context,
+                        )
+                    except Exception as e:
+                        chunk_result = _make_skipped_chunk(chunk_data, e)
+                    chunk_result.metadata["retry_round"] = round_index
+                    round_results[chunk_result.chunk_id] = chunk_result
+
+                return round_results
+
+            semaphore = asyncio.Semaphore(max_concurrent)
+
+            async def _translate_chunk_retry(chunk_data: Dict[str, str]) -> TranslatedChunk:
+                try:
+                    async with semaphore:
+                        chunk_result = await self.translate_chunk(
+                            chunk=chunk_data["content"],
+                            chunk_id=chunk_data["chunk_id"],
+                            context=context,
+                        )
+                        chunk_result.metadata["retry_round"] = round_index
+                        return chunk_result
+                except BaseException as e:
+                    if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                        raise
+                    skipped_chunk = _make_skipped_chunk(chunk_data, e)
+                    skipped_chunk.metadata["retry_round"] = round_index
+                    return skipped_chunk
+
+            async def _translate_batch_retry(
+                batch: List[Dict[str, str]],
+                batch_index: int,
+            ) -> List[TranslatedChunk]:
+                batch_id = f"retry_r{round_index}_batch_{batch_index}"
+                batch_results: List[TranslatedChunk] = []
+
+                try:
+                    async with semaphore:
+                        batch_results = await self.translate_batch(
+                            chunks=batch,
+                            context=context,
+                        )
+                except BaseException as e:
+                    if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                        raise
+                    batch_results = []
+
+                if not batch_results:
+                    fallback_results = await asyncio.gather(
+                        *[_translate_chunk_retry(chunk_data) for chunk_data in batch],
+                        return_exceptions=True,
+                    )
+                    for i, fallback_result in enumerate(fallback_results):
+                        if isinstance(fallback_result, BaseException):
+                            if isinstance(fallback_result, (KeyboardInterrupt, SystemExit)):
+                                raise fallback_result
+                            batch_results.append(
+                                _make_skipped_chunk(batch[i], fallback_result)
+                            )
+                        else:
+                            batch_results.append(cast(TranslatedChunk, fallback_result))
+
+                for chunk_result in batch_results:
+                    chunk_result.metadata["batch_id"] = batch_id
+                    chunk_result.metadata["retry_round"] = round_index
+
+                return batch_results
+
+            batch_tasks = [
+                _translate_batch_retry(batch, i) for i, batch in enumerate(retry_batches)
+            ]
+            chunk_tasks = [
+                _translate_chunk_retry(chunk_data) for chunk_data in retry_long_chunks
+            ]
+
+            combined_results = await asyncio.gather(
+                *(batch_tasks + chunk_tasks),
+                return_exceptions=True,
+            )
+            for item in combined_results:
+                if isinstance(item, BaseException):
+                    if isinstance(item, (KeyboardInterrupt, SystemExit)):
+                        raise item
+                    continue
+                if isinstance(item, list):
+                    for chunk_result in item:
+                        round_results[chunk_result.chunk_id] = chunk_result
+                else:
+                    chunk_result = cast(TranslatedChunk, item)
+                    round_results[chunk_result.chunk_id] = chunk_result
+
+            return round_results
+
+        async def _apply_placeholder_retry_rounds() -> Set[str]:
+            if not translatable_ids:
+                return set()
+
+            attempts: Dict[str, int] = {chunk_id: 1 for chunk_id in translatable_ids}
+            latest_audits: Dict[str, Dict[str, Any]] = {}
+
+            failed_ids: Set[str] = set()
+            for chunk_id in translatable_ids:
+                audit = self._audit_placeholder_alignment(
+                    translatable_chunk_map[chunk_id]["content"],
+                    results_map[chunk_id].translation,
+                )
+                latest_audits[chunk_id] = audit
+                if not audit["passed"]:
+                    failed_ids.add(chunk_id)
+
+            print(
+                f"round 1 placeholder audit: failed {len(failed_ids)} / total {len(translatable_ids)}"
+            )
+
+            for round_index in range(2, self.PLACEHOLDER_RETRY_MAX_ATTEMPTS + 1):
+                if not failed_ids:
+                    break
+
+                retry_inputs = [translatable_chunk_map[cid] for cid in translatable_ids if cid in failed_ids]
+                retry_results = await _translate_retry_round(retry_inputs, round_index)
+                for chunk_id, retry_chunk in retry_results.items():
+                    results_map[chunk_id] = retry_chunk
+                    attempts[chunk_id] = round_index
+
+                next_failed: Set[str] = set()
+                for chunk_id in failed_ids:
+                    audit = self._audit_placeholder_alignment(
+                        translatable_chunk_map[chunk_id]["content"],
+                        results_map[chunk_id].translation,
+                    )
+                    latest_audits[chunk_id] = audit
+                    if not audit["passed"]:
+                        next_failed.add(chunk_id)
+
+                failed_ids = next_failed
+                print(
+                    f"round {round_index} placeholder audit: failed {len(failed_ids)} / total {len(translatable_ids)}"
+                )
+
+            exhausted_ids = set(failed_ids)
+            for chunk_id in translatable_ids:
+                audit = latest_audits.get(chunk_id) or self._audit_placeholder_alignment(
+                    translatable_chunk_map[chunk_id]["content"],
+                    results_map[chunk_id].translation,
+                )
+                is_exhausted = chunk_id in exhausted_ids
+                results_map[chunk_id].metadata.update(
+                    {
+                        "placeholder_attempt": attempts.get(chunk_id, 1),
+                        "placeholder_audit_passed": bool(audit["passed"]),
+                        "placeholder_missing": list(audit["missing"]),
+                        "placeholder_spurious": list(audit["spurious"]),
+                        "placeholder_retry_exhausted": is_exhausted,
+                        "placeholder_warning_emitted": is_exhausted,
+                    }
+                )
+
+            if exhausted_ids:
+                exhausted_prefixes = ", ".join(sorted(chunk_id[:8] for chunk_id in exhausted_ids))
+                print(
+                    f"[WARNING] placeholder retry exhausted: {len(exhausted_ids)} chunks ({exhausted_prefixes})"
+                )
+
+            return exhausted_ids
+
+        def _refresh_state_from_results_map() -> None:
+            state["completed"] = [
+                chunk_data["chunk_id"]
+                for chunk_data in chunks
+                if chunk_data["chunk_id"] in results_map
+            ]
+            state["results"] = [
+                results_map[chunk_data["chunk_id"]].model_dump()
+                for chunk_data in chunks
+                if chunk_data["chunk_id"] in results_map
+            ]
+
         # --- SEQUENTIAL EXECUTION PATH ---
         if self.sequential_mode:
             completed_count = 0
@@ -696,6 +989,9 @@ class TranslationPipeline:
                     except Exception:
                         pass
                 self._save_state(state, total_chunks=len(chunks))
+
+            await _apply_placeholder_retry_rounds()
+            _refresh_state_from_results_map()
 
             finished_at = datetime.now().isoformat()
             started_dt = datetime.fromisoformat(self._started_at)
@@ -924,6 +1220,9 @@ class TranslationPipeline:
             print(
                 f"[WARNING] {skipped_count} chunk(s) failed to translate and were skipped (original text preserved)."
             )
+
+        await _apply_placeholder_retry_rounds()
+        _refresh_state_from_results_map()
 
         finished_at = datetime.now().isoformat()
         started_dt = datetime.fromisoformat(self._started_at)

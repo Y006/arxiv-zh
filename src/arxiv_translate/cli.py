@@ -30,6 +30,7 @@ from arxiv_translate.rules.user_paths import (
 )
 from arxiv_translate.translator import get_sdk_client, should_use_ark_autoroute
 from arxiv_translate.translator.pipeline import TranslationPipeline, TranslatedChunk
+from arxiv_translate.translator.postprocess import sanitize_markdown_bold_safe
 from arxiv_translate.parser.structure import validate_translated_placeholders
 from arxiv_translate.validator.engine import ValidationEngine
 
@@ -328,9 +329,50 @@ def translate(
 
             # Reconstruct
             translated_map = {r["chunk_id"]: r["translation"] for r in results}
+            translated_chunk_map = {chunk.chunk_id: chunk for chunk in translated_chunks}
+            source_chunk_map = {chunk.id: chunk.content for chunk in doc.chunks}
+
+            markdown_changed_chunks = 0
+            markdown_converted_spans = 0
+            markdown_skipped_spans = 0
+            for chunk_id, translation_text in list(translated_map.items()):
+                source_text = source_chunk_map.get(chunk_id, "")
+                fixed_text, md_audit = sanitize_markdown_bold_safe(
+                    source=source_text,
+                    translation=translation_text,
+                )
+                translated_map[chunk_id] = fixed_text
+                if chunk_id in translated_chunk_map:
+                    translated_chunk_map[chunk_id].metadata[
+                        "markdown_bold_postprocess"
+                    ] = md_audit
+                    translated_chunk_map[chunk_id].translation = fixed_text
+                if md_audit.get("changed"):
+                    markdown_changed_chunks += 1
+                    markdown_converted_spans += int(md_audit.get("converted_count", 0))
+                markdown_skipped_spans += int(md_audit.get("skipped_count", 0))
+
+            if markdown_changed_chunks > 0:
+                console.print(
+                    f"[cyan]Markdown bold sanitized: "
+                    f"{markdown_changed_chunks} chunk(s), "
+                    f"{markdown_converted_spans} span(s) converted[/cyan]"
+                )
+            elif markdown_skipped_spans > 0:
+                console.print(
+                    f"[cyan]Markdown bold audit skipped {markdown_skipped_spans} candidate span(s) for safety[/cyan]"
+                )
+
+            disable_missing_fallback_ids = {
+                chunk.chunk_id
+                for chunk in translated_chunks
+                if bool(chunk.metadata.get("placeholder_retry_exhausted"))
+            }
 
             translated_map, ph_issues = validate_translated_placeholders(
-                translated_map, doc
+                translated_map,
+                doc,
+                disable_missing_fallback_ids=disable_missing_fallback_ids,
             )
 
             if ph_issues:

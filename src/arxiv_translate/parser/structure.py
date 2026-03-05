@@ -229,6 +229,7 @@ def validate_translated_placeholders(
     translated_chunks: Dict[str, str],
     doc: "LaTeXDocument",
     valid_placeholders: Optional[Set[str]] = None,
+    disable_missing_fallback_ids: Optional[Set[str]] = None,
 ) -> Tuple[Dict[str, str], List[Dict]]:
     """
     校验并自动修复 LLM 翻译文本中的占位符问题。
@@ -260,6 +261,7 @@ def validate_translated_placeholders(
     # 4. 逐 chunk 校验
     fixed_chunks: Dict[str, str] = {}
     issues: List[Dict] = []
+    disable_missing_fallback_ids = disable_missing_fallback_ids or set()
 
     for chunk_id, translated_text in translated_chunks.items():
         trans_phs = set(ph_pattern.findall(translated_text))
@@ -336,7 +338,11 @@ def validate_translated_placeholders(
             )
 
         # 缺失任意占位符时，整块回退 source，避免结构损坏
-        if missing_non_whitelist and chunk_id in chunk_map:
+        if (
+            missing_non_whitelist
+            and chunk_id in chunk_map
+            and chunk_id not in disable_missing_fallback_ids
+        ):
             translated_text = chunk_map[chunk_id].content
             issues.append(
                 {

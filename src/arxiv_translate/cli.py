@@ -29,7 +29,7 @@ from arxiv_translate.rules.user_paths import (
     migrate_legacy_files,
 )
 from arxiv_translate.translator import get_sdk_client, should_use_ark_autoroute
-from arxiv_translate.translator.pipeline import TranslationPipeline
+from arxiv_translate.translator.pipeline import TranslationPipeline, TranslatedChunk
 from arxiv_translate.parser.structure import validate_translated_placeholders
 from arxiv_translate.validator.engine import ValidationEngine
 
@@ -353,10 +353,25 @@ def translate(
                             f"[red]  MISSING: chunk {issue['chunk_id'][:8]}..., "
                             f"{issue['bad']} lost in translation[/red]"
                         )
+                    elif issue["type"] == "missing_fallback":
+                        console.print(
+                            f"[red]  MISSING FALLBACK: chunk {issue['chunk_id'][:8]}..., "
+                            f"missing={issue['bad']} -> reverted to source[/red]"
+                        )
 
             translated_tex, translated_chunk_start_lines = (
                 doc.reconstruct_with_chunk_start_lines(translated_map)
             )
+
+            translated_chunks_for_validation = [
+                TranslatedChunk(
+                    source=chunk.source,
+                    translation=translated_map.get(chunk.chunk_id, chunk.translation),
+                    chunk_id=chunk.chunk_id,
+                    metadata=dict(chunk.metadata or {}),
+                )
+                for chunk in translated_chunks
+            ]
 
             # Save
             out_file = download_result.main_tex.parent / "main_translated.tex"
@@ -375,7 +390,7 @@ def translate(
             val_result = validator.validate(
                 translated_tex,
                 original_full,
-                translated_chunks=translated_chunks,
+                translated_chunks=translated_chunks_for_validation,
                 source_chunk_start_lines=source_chunk_start_lines,
                 translation_chunk_start_lines=translated_chunk_start_lines,
             )
@@ -401,6 +416,7 @@ def translate(
                 ) as progress:
                     task = progress.add_task("Compiling PDF...", total=None)
                     compiler = LaTeXCompiler(timeout=config.compilation.timeout)
+                    compile_error: Optional[str] = None
                     try:
                         latex_source = out_file.read_text(encoding="utf-8")
                         # Save the final version that will be compiled (for debugging)
@@ -425,22 +441,17 @@ def translate(
                                 )
                             )
                         else:
-                            progress.update(
-                                task, description=f"[red]Compilation failed[/red]"
-                            )
-                            console.print(
-                                f"[yellow]Error: {result.error_message}[/yellow]"
-                            )
-                            console.print(
-                                "[yellow]Generated .tex file is saved. You may try compiling it manually.[/yellow]"
-                            )
+                            compile_error = result.error_message or "Unknown error"
                     except Exception as e:
-                        progress.update(
-                            task, description=f"[red]Compilation failed: {e}[/red]"
-                        )
+                        compile_error = str(e)
+
+                    if compile_error:
+                        progress.update(task, description=f"[red]Compilation failed[/red]")
+                        console.print(f"[yellow]Error: {compile_error}[/yellow]")
                         console.print(
                             "[yellow]Generated .tex file is saved. You may try compiling it manually.[/yellow]"
                         )
+                        raise RuntimeError(f"Compilation failed: {compile_error}")
 
         except Exception as e:
             console.print(f"[bold red]Pipeline failed:[/bold red] {e}")

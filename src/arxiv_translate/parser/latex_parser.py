@@ -69,6 +69,7 @@ class LaTeXParser:
     ):
         self.chunks: List[Chunk] = []
         self.protected_counter = 0
+        self.amp_counter = 0
         self.placeholder_map: Dict[str, str] = {}
         self.font_config = font_config
         self._protected_envs: Set[str] = set(self.PROTECTED_ENVIRONMENTS)
@@ -114,6 +115,7 @@ class LaTeXParser:
 
         self.chunks = []
         self.protected_counter = 0
+        self.amp_counter = 0
         self.placeholder_map = {}
 
         preamble = self._extract_title_command(preamble)
@@ -1066,16 +1068,72 @@ class LaTeXParser:
         chunk_id = str(uuid.uuid4())
         placeholder = f"{{{{CHUNK_{chunk_id}}}}}"
 
+        chunk_content = para_text.strip()
+        preserved_elements: Dict[str, str] = {}
+        if self._looks_like_table_alignment_paragraph(chunk_content):
+            chunk_content, amp_placeholders = self._protect_table_alignment_ampersands(
+                chunk_content
+            )
+            preserved_elements.update(amp_placeholders)
+
         chunk = Chunk(
             id=chunk_id,
-            content=para_text.strip(),
+            content=chunk_content,
             latex_wrapper="%s",
             context="paragraph",
-            preserved_elements={},
+            preserved_elements=preserved_elements,
         )
         self.chunks.append(chunk)
 
         return placeholder
+
+    def _looks_like_table_alignment_paragraph(self, para_text: str) -> bool:
+        """Heuristic detector for table-like alignment rows that use '&' as separators."""
+        if not re.search(r"(?<!\\)&", para_text):
+            return False
+
+        if re.search(
+            r"\\(?:multirow|multicolumn|cmidrule|cline|toprule|midrule|bottomrule)\b",
+            para_text,
+        ):
+            return True
+
+        for line in para_text.splitlines():
+            unescaped_amp_count = len(re.findall(r"(?<!\\)&", line))
+            if unescaped_amp_count >= 2:
+                return True
+            if unescaped_amp_count >= 1 and re.search(r"\\\\\s*(?:%.*)?$", line):
+                return True
+
+        return False
+
+    def _protect_table_alignment_ampersands(
+        self, text: str
+    ) -> Tuple[str, Dict[str, str]]:
+        """Replace unescaped table alignment '&' with placeholders."""
+        protected: List[str] = []
+        preserved_elements: Dict[str, str] = {}
+
+        i = 0
+        while i < len(text):
+            ch = text[i]
+            if ch == "&":
+                backslashes = 0
+                j = i - 1
+                while j >= 0 and text[j] == "\\":
+                    backslashes += 1
+                    j -= 1
+                if backslashes % 2 == 0:
+                    self.amp_counter += 1
+                    amp_placeholder = f"[[AMP_{self.amp_counter}]]"
+                    preserved_elements[amp_placeholder] = "&"
+                    protected.append(amp_placeholder)
+                    i += 1
+                    continue
+            protected.append(ch)
+            i += 1
+
+        return "".join(protected), preserved_elements
 
     def _flatten_latex(self, content: str, base_dir: str) -> str:
         def replace_input(match):

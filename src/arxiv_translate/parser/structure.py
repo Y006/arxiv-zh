@@ -235,7 +235,7 @@ def validate_translated_placeholders(
 
     - typo (编辑距离 ≤ 2): 自动替换为正确占位符
     - hallucination (编辑距离 > 2 或跨 chunk 引用): 从文本中删除
-    - missing (源文本有但翻译中缺失): 仅记录警告，不修复
+    - missing (源文本有但翻译中缺失): 整块回退源文本，确保结构稳定
 
     返回: (修复后的 translated_chunks, 问题列表)
     """
@@ -321,15 +321,29 @@ def validate_translated_placeholders(
         # 需要在修复后重新扫描
         current_phs = set(ph_pattern.findall(translated_text))
         missing = source_phs - current_phs
+        missing_non_whitelist: List[str] = []
         for miss_ph in missing:
             if miss_ph in whitelist:
                 continue
+            missing_non_whitelist.append(miss_ph)
             issues.append(
                 {
                     "type": "missing",
                     "chunk_id": chunk_id,
                     "bad": miss_ph,
                     "fixed_to": None,
+                }
+            )
+
+        # 缺失任意占位符时，整块回退 source，避免结构损坏
+        if missing_non_whitelist and chunk_id in chunk_map:
+            translated_text = chunk_map[chunk_id].content
+            issues.append(
+                {
+                    "type": "missing_fallback",
+                    "chunk_id": chunk_id,
+                    "bad": sorted(missing_non_whitelist),
+                    "fixed_to": "source",
                 }
             )
 

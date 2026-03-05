@@ -75,15 +75,24 @@ class LaTeXCompiler:
                 if success:
                     # Move generated PDF to output_path
                     pdf_file = temp_path / "main.pdf"
-                    if pdf_file.exists():
+                    if pdf_file.exists() and self._is_pdf_healthy(pdf_file):
                         output_path.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(pdf_file, output_path)
-                        return CompilationResult(
-                            success=True,
-                            pdf_path=output_path,
-                            log_content=log,
-                            engine_used=engine,
+                        if self._is_pdf_healthy(output_path):
+                            return CompilationResult(
+                                success=True,
+                                pdf_path=output_path,
+                                log_content=log,
+                                engine_used=engine,
+                            )
+                        last_log = log
+                        last_error = (
+                            "Generated PDF failed integrity check after copy."
                         )
+                        continue
+                    last_log = log
+                    last_error = "Generated PDF failed integrity check."
+                    continue
 
                 last_log = log
                 last_error = error
@@ -176,9 +185,22 @@ class LaTeXCompiler:
         self, engine: str, source_file: Path, cwd: Path
     ) -> Tuple[bool, str, Optional[str]]:
         """Runs a single pass of the latex engine."""
-        cmd = [engine, "-interaction=nonstopmode", source_file.name]
+        cmd = [
+            engine,
+            "-interaction=nonstopmode",
+            "-halt-on-error",
+            "-file-line-error",
+            source_file.name,
+        ]
 
         try:
+            pdf_file = cwd / "main.pdf"
+            try:
+                if pdf_file.exists():
+                    pdf_file.unlink()
+            except Exception:
+                pass
+
             process = subprocess.run(
                 cmd,
                 cwd=cwd,
@@ -200,11 +222,21 @@ class LaTeXCompiler:
                 except Exception:
                     pass
 
-            pdf_file = cwd / "main.pdf"
-            if process.returncode == 0 or pdf_file.exists():
-                return True, log_content, None
-            else:
-                return False, log_content, self._extract_error(log_content)
+            if process.returncode != 0:
+                return (
+                    False,
+                    log_content,
+                    f"Compilation command exited with code {process.returncode}. "
+                    f"{self._extract_error(log_content)}",
+                )
+
+            if not self._is_pdf_healthy(pdf_file):
+                return (
+                    False,
+                    log_content,
+                    "Generated PDF failed integrity check (%PDF/%%EOF).",
+                )
+            return True, log_content, None
 
         except subprocess.TimeoutExpired:
             return False, "Timeout expired", "Compilation timed out"
@@ -228,3 +260,26 @@ class LaTeXCompiler:
             return "Fatal error detected in logs"
 
         return "Unknown error (check full logs)"
+
+    def _is_pdf_healthy(self, pdf_file: Path) -> bool:
+        """Basic PDF health check: file exists, has %PDF header, and contains %%EOF trailer."""
+        try:
+            if not pdf_file.exists():
+                return False
+            if pdf_file.stat().st_size < 8:
+                return False
+
+            with pdf_file.open("rb") as f:
+                header = f.read(5)
+                if not header.startswith(b"%PDF"):
+                    return False
+
+                tail_window = min(pdf_file.stat().st_size, 2048)
+                f.seek(-tail_window, os.SEEK_END)
+                tail = f.read()
+                if b"%%EOF" not in tail:
+                    return False
+
+            return True
+        except Exception:
+            return False

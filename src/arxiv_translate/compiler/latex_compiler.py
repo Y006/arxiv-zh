@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
-from .chinese_support import inject_chinese_support
+from .chinese_support import (
+    ENGINE_CONFLICT_PRIMITIVES,
+    _strip_engine_conflict_primitives,
+    inject_chinese_support,
+)
 
 
 @dataclass
@@ -76,6 +80,7 @@ class LaTeXCompiler:
                 missing_font: Optional[str] = None
                 missing_file: Optional[str] = None
                 has_microtype_tracking_error = False
+                conflict_primitive: Optional[str] = None
                 round_failures: List[Tuple[str, Optional[str], str]] = []
 
                 for engine in self.engines:
@@ -124,6 +129,10 @@ class LaTeXCompiler:
                         has_microtype_tracking_error = self._has_microtype_tracking_error(
                             log
                         )
+                    if conflict_primitive is None:
+                        conflict_primitive = self._extract_engine_conflict_primitive(
+                            log
+                        )
 
                 fallback_applied = False
                 if missing_font:
@@ -150,6 +159,23 @@ class LaTeXCompiler:
                     ) = self._apply_missing_file_fallback(
                         compile_source,
                         missing_file,
+                        workspace_dir=temp_path,
+                    )
+                    if (
+                        fallback_changed
+                        and fallback_reason not in applied_fallback_reasons
+                    ):
+                        compile_source = patched_source
+                        applied_fallback_reasons.add(fallback_reason)
+                        fallback_applied = True
+
+                if not fallback_applied and conflict_primitive:
+                    (
+                        patched_source,
+                        fallback_reason,
+                        fallback_changed,
+                    ) = self._apply_pdftex_primitive_fallback(
+                        compile_source,
                         workspace_dir=temp_path,
                     )
                     if (
@@ -446,6 +472,55 @@ class LaTeXCompiler:
         return latex_source, "no_fallback", False
 
     @staticmethod
+    def _extract_engine_conflict_primitive(log: str) -> Optional[str]:
+        if not log:
+            return None
+
+        lowered = log.lower()
+        if "undefined control sequence" not in lowered:
+            return None
+
+        primitive_pattern = "|".join(re.escape(cmd) for cmd in ENGINE_CONFLICT_PRIMITIVES)
+        detailed_match = re.search(
+            rf"Undefined control sequence\.(?:.|\n){{0,300}}?l\.\d+\s*\\(?P<cmd>{primitive_pattern})\b",
+            log,
+            re.IGNORECASE,
+        )
+        if detailed_match:
+            return detailed_match.group("cmd").lower()
+
+        for cmd in ENGINE_CONFLICT_PRIMITIVES:
+            if f"\\{cmd}" in lowered:
+                return cmd
+
+        return None
+
+    @staticmethod
+    def _rewrite_strip_engine_conflict_primitives(text: str) -> Tuple[str, bool]:
+        patched = _strip_engine_conflict_primitives(text)
+        return patched, patched != text
+
+    def _apply_pdftex_primitive_fallback(
+        self,
+        latex_source: str,
+        workspace_dir: Optional[Path] = None,
+    ) -> Tuple[str, str, bool]:
+        patched_source, source_changed = self._rewrite_strip_engine_conflict_primitives(
+            latex_source
+        )
+        workspace_changed = False
+        if workspace_dir and workspace_dir.exists():
+            workspace_changed = self._patch_workspace_text_files(
+                workspace_dir,
+                self._rewrite_strip_engine_conflict_primitives,
+                skip_main_tex=True,
+            )
+        changed = source_changed or workspace_changed
+        if changed:
+            return patched_source, "fallback_remove_pdftex_primitives", True
+        return latex_source, "no_fallback", False
+
+    @staticmethod
     def _has_microtype_tracking_error(log: str) -> bool:
         lowered = (log or "").lower().replace("\r", "\n")
         return bool(
@@ -631,12 +706,18 @@ class LaTeXCompiler:
             r"(Package\s+[^\s:]+\s+Error:|LaTeX\s+Error:)",
             re.IGNORECASE,
         )
+        undefined_control_error = re.compile(
+            r"Undefined control sequence\.",
+            re.IGNORECASE,
+        )
         for i, line in enumerate(lines):
             # LaTeX errors usually start with !
             if line.strip().startswith("!"):
                 # capture context (up to 5 lines)
                 return "\n".join(lines[i : min(i + 5, len(lines))])
             if package_or_latex_error.search(line):
+                return "\n".join(lines[i : min(i + 5, len(lines))])
+            if undefined_control_error.search(line):
                 return "\n".join(lines[i : min(i + 5, len(lines))])
 
         # Fallback: check for common error patterns if no ! found
@@ -652,6 +733,8 @@ class LaTeXCompiler:
             return "fontspec"
         if "package" in lowered:
             return "package"
+        if "undefined control sequence" in lowered:
+            return "latex"
         if "latex error" in lowered or lowered.startswith("!"):
             return "latex"
         return "unknown"

@@ -265,3 +265,57 @@ def test_compile_reports_latest_round_error_after_fallback(monkeypatch, tmp_path
     assert result.error_message is not None
     assert "microtype error" in result.error_message.lower()
     assert "bxcoloremoji-names.def" not in result.error_message
+
+
+def test_extract_error_detects_undefined_control_sequence():
+    compiler = LaTeXCompiler()
+    log = (
+        "./main.tex:1: Undefined control sequence.\n"
+        "l.1 \\pdfoutput\n"
+        "              =1\n"
+    )
+    extracted = compiler._extract_error(log)
+    assert "Undefined control sequence" in extracted
+    assert "\\pdfoutput" in extracted
+
+
+def test_compile_retries_after_pdftex_primitive_conflict(monkeypatch, tmp_path: Path):
+    compiler = LaTeXCompiler()
+    compiler.engines = ["xelatex"]
+    call_count = {"n": 0}
+
+    def fake_run_engine(engine, source_file, cwd, latex_source):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            assert r"\pdfoutput=1" in latex_source
+            return (
+                False,
+                "./main.tex:1: Undefined control sequence.\n"
+                "l.1 \\pdfoutput\n"
+                "              =1\n",
+                "Compilation command exited with code 1. Unknown error (check full logs)",
+            )
+
+        assert r"\pdfoutput=1" not in latex_source
+        (cwd / "main.pdf").write_bytes(b"%PDF-1.5\n1 0 obj\n<<>>\nendobj\n%%EOF\n")
+        return (True, "ok", None)
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        lambda _engine: "/usr/bin/true",
+    )
+    monkeypatch.setattr(compiler, "_run_engine", fake_run_engine)
+
+    result = compiler.compile(
+        latex_source=(
+            "\\pdfoutput=1\n"
+            "\\documentclass{article}\n"
+            "\\begin{document}\n"
+            "x\n"
+            "\\end{document}\n"
+        ),
+        output_path=tmp_path / "out.pdf",
+    )
+
+    assert result.success is True
+    assert call_count["n"] == 2

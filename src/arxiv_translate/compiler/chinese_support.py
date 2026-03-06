@@ -3,6 +3,45 @@ import shutil
 import subprocess
 from typing import Optional, List, Dict, Any, Union
 
+ENGINE_CONFLICT_PRIMITIVES = (
+    "pdfoutput",
+    "pdfminorversion",
+    "pdfcompresslevel",
+    "pdfobjcompresslevel",
+)
+_ENGINE_CONFLICT_PATTERN = re.compile(
+    r"^\s*\\(?:"
+    + "|".join(ENGINE_CONFLICT_PRIMITIVES)
+    + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_engine_conflict_primitives(latex_source: str) -> str:
+    """Remove pdfTeX primitive commands that conflict with XeLaTeX/LuaLaTeX."""
+    if not latex_source:
+        return latex_source
+
+    begin_doc_match = re.search(r"\\begin\{document\}", latex_source)
+    if begin_doc_match:
+        preamble = latex_source[: begin_doc_match.start()]
+        body = latex_source[begin_doc_match.start() :]
+    else:
+        preamble = latex_source
+        body = ""
+
+    kept_lines: List[str] = []
+    for line in preamble.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith("%"):
+            kept_lines.append(line)
+            continue
+        if _ENGINE_CONFLICT_PATTERN.match(line):
+            continue
+        kept_lines.append(line)
+
+    return "".join(kept_lines) + body
+
 
 def get_available_fonts() -> List[str]:
     """Detect available CJK fonts using fc-list."""
@@ -100,6 +139,8 @@ def inject_chinese_support(latex_source: str, font_config: Optional[Any] = None)
     Returns:
         str: The modified LaTeX source code with Chinese support injected.
     """
+    latex_source = _strip_engine_conflict_primitives(latex_source)
+
     # Check if xeCJK is already present to avoid duplication
     if "xeCJK" in latex_source:
         return latex_source

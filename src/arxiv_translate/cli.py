@@ -34,6 +34,7 @@ from arxiv_translate.translator.pipeline import TranslationPipeline, TranslatedC
 from arxiv_translate.translator.postprocess import sanitize_markdown_bold_safe
 from arxiv_translate.parser.structure import validate_translated_placeholders
 from arxiv_translate.validator.engine import ValidationEngine
+from arxiv_translate.validator.rules import BuiltInRules
 
 app = typer.Typer(
     name="arx",
@@ -233,6 +234,11 @@ def _write_local_cache_after_quality_gate(
             cache_skipped += 1
             continue
 
+        if BuiltInRules.collect_chunk_quality_warning_types(metadata):
+            metadata["local_cache_skip_reason"] = "quality_warning"
+            cache_skipped += 1
+            continue
+
         if not chunk.translation.strip():
             metadata["local_cache_skip_reason"] = "empty_translation"
             cache_skipped += 1
@@ -254,6 +260,37 @@ def _write_local_cache_after_quality_gate(
             cache_skipped += 1
 
     return (cache_written, cache_skipped)
+
+
+def _print_validation_result(result: Any) -> None:
+    errors = [error for error in result.errors if error.severity == "error"]
+    warnings = [error for error in result.errors if error.severity == "warning"]
+    infos = [error for error in result.errors if error.severity == "info"]
+
+    if errors:
+        console.print(
+            "[yellow]Validation Issues "
+            f"({len(errors)} error(s), {len(warnings)} warning(s)):[/yellow]"
+        )
+        for err in errors + warnings + infos:
+            color = "red" if err.severity == "error" else "yellow"
+            console.print(f"[{color}]- {err.message}[/{color}]")
+            if err.suggestion:
+                console.print(f"  Suggestion: {err.suggestion}", style="dim")
+        return
+
+    if warnings or infos:
+        console.print(
+            "[yellow]Validation Passed with Warnings "
+            f"({len(warnings) + len(infos)}):[/yellow]"
+        )
+        for err in warnings + infos:
+            console.print(f"[yellow]- {err.message}[/yellow]")
+            if err.suggestion:
+                console.print(f"  Suggestion: {err.suggestion}", style="dim")
+        return
+
+    console.print("[green]Validation Passed[/green]")
 
 
 @app.command()
@@ -607,18 +644,7 @@ def translate(
                 source_chunk_start_lines=source_chunk_start_lines,
                 translation_chunk_start_lines=translated_chunk_start_lines,
             )
-
-            if val_result.valid:
-                console.print("[green]Validation Passed[/green]")
-            else:
-                console.print(
-                    f"[yellow]Validation Issues ({len(val_result.errors)}):[/yellow]"
-                )
-                for err in val_result.errors:
-                    color = "red" if err.severity == "error" else "yellow"
-                    console.print(f"[{color}]- {err.message}[/{color}]")
-                    if err.suggestion:
-                        console.print(f"  Suggestion: {err.suggestion}", style="dim")
+            _print_validation_result(val_result)
 
             # 5. Compile
             if not no_compile:
@@ -845,12 +871,11 @@ def validate(
     validator = ValidationEngine()
     result = validator.validate(content, original)
 
-    if result.valid:
+    if result.valid and not result.errors:
         console.print("[green]File is valid![/green]")
-    else:
-        console.print(f"[red]Found {len(result.errors)} errors[/red]")
-        for err in result.errors:
-            console.print(f"- {err.message} ({err.severity})")
+        return
+
+    _print_validation_result(result)
 
 
 @cache_app.command("stats")

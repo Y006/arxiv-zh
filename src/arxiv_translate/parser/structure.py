@@ -55,6 +55,27 @@ class LaTeXDocument:
     # Map of global placeholders (e.g., "[[CITE_1]]") to original LaTeX content
     # These are stored at document level as they don't belong to any specific chunk
     global_placeholders: Dict[str, str] = field(default_factory=dict)
+    CHUNK_PLACEHOLDER_PATTERN = re.compile(r"\{\{CHUNK_([A-Za-z0-9-]+)\}\}")
+
+    def _restore_global_placeholders(self, text: str, max_iterations: int) -> str:
+        restored = text
+        for _ in range(max_iterations):
+            replacements_made = False
+            for placeholder, original in self.global_placeholders.items():
+                if placeholder in restored:
+                    restored = restored.replace(placeholder, original)
+                    replacements_made = True
+            if not replacements_made:
+                break
+        return restored
+
+    def _restore_chunk_preserved_elements(self, text: str) -> str:
+        restored = text
+        for chunk in self.chunks:
+            for placeholder, original in chunk.preserved_elements.items():
+                if placeholder in restored:
+                    restored = restored.replace(placeholder, original)
+        return restored
 
     def _reconstruct_internal(
         self,
@@ -67,19 +88,21 @@ class LaTeXDocument:
 
         full_result = preamble_result + body_result
 
-        max_iterations = 10
-        for _ in range(max_iterations):
-            replacements_made = False
-            for placeholder, original in self.global_placeholders.items():
-                if placeholder in full_result:
-                    full_result = full_result.replace(placeholder, original)
-                    replacements_made = True
-            if not replacements_made:
-                break
+        max_iterations = max(
+            10,
+            len(self.chunks) * 2 + len(self.global_placeholders) * 2 + 5,
+        )
+        full_result = self._restore_global_placeholders(full_result, max_iterations)
 
-        for chunk in self.chunks:
-            placeholder = f"{{{{CHUNK_{chunk.id}}}}}"
-            if placeholder in full_result:
+        for _ in range(max_iterations):
+            previous_result = full_result
+            full_result = self._restore_global_placeholders(full_result, max_iterations)
+
+            for chunk in self.chunks:
+                placeholder = f"{{{{CHUNK_{chunk.id}}}}}"
+                if placeholder not in full_result:
+                    continue
+
                 trans_text = (
                     translated_chunks.get(chunk.id) if translated_chunks else None
                 )
@@ -90,17 +113,10 @@ class LaTeXDocument:
                     reconstructed = f"{start_marker}{reconstructed}{end_marker}"
                 full_result = full_result.replace(placeholder, reconstructed)
 
-        for chunk in self.chunks:
-            for placeholder, original in chunk.preserved_elements.items():
-                full_result = full_result.replace(placeholder, original)
+            full_result = self._restore_chunk_preserved_elements(full_result)
+            full_result = self._restore_global_placeholders(full_result, max_iterations)
 
-        for _ in range(max_iterations):
-            replacements_made = False
-            for placeholder, original in self.global_placeholders.items():
-                if placeholder in full_result:
-                    full_result = full_result.replace(placeholder, original)
-                    replacements_made = True
-            if not replacements_made:
+            if full_result == previous_result:
                 break
 
         if collect_chunk_start_lines:

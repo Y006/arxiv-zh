@@ -17,6 +17,14 @@ class ValidationResult(BaseModel):
     errors: List[ValidationError]
     score: float = 1.0
 
+    @property
+    def warning_count(self) -> int:
+        return sum(1 for error in self.errors if error.severity == "warning")
+
+    @property
+    def error_count(self) -> int:
+        return sum(1 for error in self.errors if error.severity == "error")
+
 
 class ValidationEngine:
     def __init__(self):
@@ -33,6 +41,10 @@ class ValidationEngine:
     ) -> ValidationResult:
         errors = []
 
+        chunk_placeholder_warnings = BuiltInRules.check_chunk_placeholders(translated)
+        for msg in chunk_placeholder_warnings:
+            errors.append(ValidationError(message=msg, severity="warning"))
+
         # 1. Structural Validation (Built-in)
         if translated_chunks is not None:
             chunk_brace_errors = BuiltInRules.check_chunk_brace_structure(
@@ -42,6 +54,12 @@ class ValidationEngine:
             )
             for msg in chunk_brace_errors:
                 errors.append(ValidationError(message=msg, severity="error"))
+
+            chunk_quality_warnings = BuiltInRules.check_chunk_quality_warnings(
+                translated_chunks
+            )
+            for msg in chunk_quality_warnings:
+                errors.append(ValidationError(message=msg, severity="warning"))
 
         # Citations
         cite_errors = BuiltInRules.check_citations(original, translated)

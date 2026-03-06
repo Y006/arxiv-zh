@@ -3,6 +3,8 @@ from typing import List, Tuple, Set, Dict, Any, Optional
 
 
 class BuiltInRules:
+    CHUNK_PLACEHOLDER_PATTERN = re.compile(r"\{\{CHUNK_[A-Za-z0-9-]+\}\}")
+
     @staticmethod
     def _is_escaped_brace(text: str, index: int) -> bool:
         backslash_count = 0
@@ -194,6 +196,72 @@ class BuiltInRules:
             )
 
         return errors
+
+    @staticmethod
+    def check_chunk_placeholders(text: str) -> List[str]:
+        placeholders = sorted(set(BuiltInRules.CHUNK_PLACEHOLDER_PATTERN.findall(text)))
+        if not placeholders:
+            return []
+        return [
+            "Residual chunk placeholder(s) found in final output: "
+            + ", ".join(placeholders)
+        ]
+
+    @staticmethod
+    def collect_chunk_quality_warning_types(metadata: Optional[Dict[str, Any]]) -> List[str]:
+        if not isinstance(metadata, dict):
+            return []
+
+        warning_types: List[str] = []
+
+        raw_warning_types = metadata.get("quality_warning_types")
+        if isinstance(raw_warning_types, str) and raw_warning_types.strip():
+            warning_types.append(raw_warning_types.strip())
+        elif isinstance(raw_warning_types, (list, tuple, set)):
+            for warning_type in raw_warning_types:
+                warning_text = str(warning_type).strip()
+                if warning_text:
+                    warning_types.append(warning_text)
+
+        if metadata.get("untranslated_audit_passed") is False:
+            warning_types.append("untranslated_audit_failed")
+        if bool(metadata.get("untranslated_retry_exhausted")):
+            warning_types.append("untranslated_retry_exhausted")
+        if bool(metadata.get("kept_last_translation_on_fallback")):
+            warning_types.append("kept_last_translation_on_fallback")
+        if metadata.get("brace_audit_passed") is False:
+            warning_types.append("brace_audit_failed")
+        if metadata.get("line_end_audit_passed") is False:
+            warning_types.append("line_end_audit_failed")
+
+        deduped_warning_types: List[str] = []
+        seen_warning_types: Set[str] = set()
+        for warning_type in warning_types:
+            if warning_type in seen_warning_types:
+                continue
+            seen_warning_types.add(warning_type)
+            deduped_warning_types.append(warning_type)
+
+        return deduped_warning_types
+
+    @staticmethod
+    def check_chunk_quality_warnings(translated_chunks: List[Any]) -> List[str]:
+        warnings: List[str] = []
+
+        for chunk in translated_chunks:
+            chunk_id = getattr(chunk, "chunk_id", None)
+            metadata = getattr(chunk, "metadata", None)
+            warning_types = BuiltInRules.collect_chunk_quality_warning_types(metadata)
+            if not warning_types:
+                continue
+
+            chunk_label = chunk_id if isinstance(chunk_id, str) else "<unknown>"
+            warnings.append(
+                f"Chunk quality warning (chunk_id={chunk_label}): "
+                + ", ".join(warning_types)
+            )
+
+        return warnings
 
     @staticmethod
     def check_braces(text: str) -> List[str]:

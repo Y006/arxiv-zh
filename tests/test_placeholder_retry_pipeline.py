@@ -126,3 +126,62 @@ async def test_partial_batch_retry_only_failed_chunks():
     by_id = {chunk.chunk_id: chunk for chunk in results}
     assert by_id["c1"].metadata["placeholder_attempt"] == 2
     assert by_id["c2"].metadata["placeholder_attempt"] == 1
+
+
+@pytest.mark.asyncio
+async def test_brace_escape_drift_fixed_without_retry():
+    pipeline = _build_pipeline(batch_short_threshold=0)
+    call_count = {"c1": 0}
+
+    source = r'Tool call: \{"name": "search", "args": \{"q": "paper"\}\}'
+    drift_translation = r'工具调用：{"name": "search", "args": {"q": "paper"}}'
+
+    async def fake_translate_chunk(chunk: str, chunk_id: str, context=None):
+        call_count[chunk_id] += 1
+        return TranslatedChunk(
+            source=chunk,
+            translation=drift_translation,
+            chunk_id=chunk_id,
+            metadata={},
+        )
+
+    chunks = [{"chunk_id": "c1", "content": source}]
+    with patch.object(pipeline, "translate_chunk", side_effect=fake_translate_chunk):
+        results = await pipeline.translate_document(chunks, max_concurrent=2)
+
+    chunk = results[0]
+    assert call_count["c1"] == 1
+    assert chunk.metadata["brace_audit_passed"] is True
+    assert chunk.metadata["brace_fix_applied"] is True
+    assert chunk.metadata["brace_fix_edit_count"] > 0
+    assert chunk.metadata["brace_retry_exhausted"] is False
+    assert chunk.metadata["brace_fallback_applied"] is False
+    assert r'\{"name": "search"' in chunk.translation
+
+
+@pytest.mark.asyncio
+async def test_brace_retry_exhausted_falls_back_to_source():
+    pipeline = _build_pipeline(batch_short_threshold=0)
+    call_count = {"c1": 0}
+
+    source = r'Schema: \{"a": \{"b": 1\}\}'
+
+    async def fake_translate_chunk(chunk: str, chunk_id: str, context=None):
+        call_count[chunk_id] += 1
+        return TranslatedChunk(
+            source=chunk,
+            translation='模式："a": {"b": 1',
+            chunk_id=chunk_id,
+            metadata={},
+        )
+
+    chunks = [{"chunk_id": "c1", "content": source}]
+    with patch.object(pipeline, "translate_chunk", side_effect=fake_translate_chunk):
+        results = await pipeline.translate_document(chunks, max_concurrent=2)
+
+    chunk = results[0]
+    assert call_count["c1"] == 3
+    assert chunk.translation == source
+    assert chunk.metadata["brace_retry_exhausted"] is True
+    assert chunk.metadata["brace_fallback_applied"] is True
+    assert chunk.metadata["brace_audit_passed"] is True

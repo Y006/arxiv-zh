@@ -45,6 +45,7 @@ class LaTeXCompiler:
                          If provided, contents are copied to the temp compile dir.
         """
         output_path = Path(output_path).resolve()
+        compile_source = latex_source
 
         # Create a temporary directory for compilation to keep things clean
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -56,46 +57,67 @@ class LaTeXCompiler:
                 if working_dir_path.exists():
                     self._copy_resources(working_dir_path, temp_path)
 
-            # Write source to file
             source_file = temp_path / "main.tex"
-            source_file.write_text(latex_source, encoding="utf-8")
-
             last_error = None
             last_log = None
+            applied_fallback_reasons = set()
 
-            for engine in self.engines:
-                # Skip engines that are not installed
-                if not shutil.which(engine):
-                    continue
+            for _round in range(3):
+                source_file.write_text(compile_source, encoding="utf-8")
+                missing_font: Optional[str] = None
 
-                success, log, error = self._run_engine(
-                    engine, source_file, temp_path, latex_source
-                )
-
-                if success:
-                    # Move generated PDF to output_path
-                    pdf_file = temp_path / "main.pdf"
-                    if pdf_file.exists() and self._is_pdf_healthy(pdf_file):
-                        output_path.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(pdf_file, output_path)
-                        if self._is_pdf_healthy(output_path):
-                            return CompilationResult(
-                                success=True,
-                                pdf_path=output_path,
-                                log_content=log,
-                                engine_used=engine,
-                            )
-                        last_log = log
-                        last_error = (
-                            "Generated PDF failed integrity check after copy."
-                        )
+                for engine in self.engines:
+                    # Skip engines that are not installed
+                    if not shutil.which(engine):
                         continue
-                    last_log = log
-                    last_error = "Generated PDF failed integrity check."
-                    continue
 
-                last_log = log
-                last_error = error
+                    success, log, error = self._run_engine(
+                        engine, source_file, temp_path, compile_source
+                    )
+
+                    if success:
+                        # Move generated PDF to output_path
+                        pdf_file = temp_path / "main.pdf"
+                        if pdf_file.exists() and self._is_pdf_healthy(pdf_file):
+                            output_path.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(pdf_file, output_path)
+                            if self._is_pdf_healthy(output_path):
+                                return CompilationResult(
+                                    success=True,
+                                    pdf_path=output_path,
+                                    log_content=log,
+                                    engine_used=engine,
+                                )
+                            last_log = log
+                            last_error = (
+                                "Generated PDF failed integrity check after copy."
+                            )
+                            continue
+                        last_log = log
+                        last_error = "Generated PDF failed integrity check."
+                        continue
+
+                    last_log = log
+                    last_error = error
+                    if missing_font is None:
+                        missing_font = self._extract_missing_font_name(log)
+
+                if missing_font:
+                    (
+                        patched_source,
+                        fallback_reason,
+                    ) = self._apply_missing_font_fallback(
+                        compile_source,
+                        missing_font,
+                    )
+                    if (
+                        patched_source != compile_source
+                        and fallback_reason not in applied_fallback_reasons
+                    ):
+                        compile_source = patched_source
+                        applied_fallback_reasons.add(fallback_reason)
+                        continue
+                break
 
             # If we reach here, all engines failed
             return CompilationResult(
@@ -165,6 +187,88 @@ class LaTeXCompiler:
         if re.search(r"\\bibliography\{", latex_source):
             return "bibtex"
         return None
+
+    def _extract_missing_font_name(self, log: str) -> Optional[str]:
+        if not log:
+            return None
+        match = re.search(
+            r'fontsp\s*ec Error:\s*The font "([^"]+)" cannot be(?:\s*\n.*)?\s*found',
+            log,
+            re.IGNORECASE,
+        )
+        if match:
+            return match.group(1).strip()
+        return None
+
+    def _apply_missing_font_fallback(
+        self,
+        latex_source: str,
+        missing_font: str,
+    ) -> Tuple[str, str]:
+        missing_key = missing_font.strip().lower()
+
+        if missing_key in {"fontawesome", "font awesome"}:
+            if re.search(
+                r"\\usepackage(?:\[[^\]]*\])?\{fontawesome\}",
+                latex_source,
+            ) and not re.search(r"\\fa[A-Za-z]+", latex_source):
+                patched = re.sub(
+                    r"^[ \t]*\\usepackage(?:\[[^\]]*\])?\{fontawesome\}[ \t]*\n?",
+                    "",
+                    latex_source,
+                    flags=re.MULTILINE,
+                )
+                if patched != latex_source:
+                    return patched, "remove_unused_fontawesome"
+            return latex_source, "no_fallback"
+
+        main_match = re.search(
+            r"\\setCJKmainfont(?:\[[^\]]*\])?\{([^}]*)\}",
+            latex_source,
+        )
+        if not main_match:
+            return latex_source, "no_fallback"
+
+        main_font = main_match.group(1).strip()
+        if not main_font:
+            return latex_source, "no_fallback"
+
+        sans_match = re.search(
+            r"\\setCJKsansfont(?:\[[^\]]*\])?\{([^}]*)\}",
+            latex_source,
+        )
+        mono_match = re.search(
+            r"\\setCJKmonofont(?:\[[^\]]*\])?\{([^}]*)\}",
+            latex_source,
+        )
+        sans_font = sans_match.group(1).strip() if sans_match else None
+        mono_font = mono_match.group(1).strip() if mono_match else None
+
+        should_patch = False
+        if sans_font and sans_font.lower() == missing_key:
+            should_patch = True
+        if mono_font and mono_font.lower() == missing_key:
+            should_patch = True
+        if not should_patch:
+            return latex_source, "no_fallback"
+
+        patched_source = latex_source
+        patched_source = re.sub(
+            r"(\\setCJKsansfont(?:\[[^\]]*\])?\{)[^}]*\}",
+            rf"\g<1>{main_font}" + "}",
+            patched_source,
+            count=1,
+        )
+        patched_source = re.sub(
+            r"(\\setCJKmonofont(?:\[[^\]]*\])?\{)[^}]*\}",
+            rf"\g<1>{main_font}" + "}",
+            patched_source,
+            count=1,
+        )
+        if patched_source != latex_source:
+            return patched_source, "fallback_cjk_aux_fonts_to_main"
+
+        return latex_source, "no_fallback"
 
     def _run_bibliography_tool(self, tool: str, cwd: Path) -> bool:
         cmd = [tool, "main"]

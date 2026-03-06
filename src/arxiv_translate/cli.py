@@ -213,6 +213,16 @@ def _write_local_cache_after_quality_gate(
             cache_skipped += 1
             continue
 
+        if not bool(metadata.get("brace_audit_passed")):
+            metadata["local_cache_skip_reason"] = "brace_audit_failed"
+            cache_skipped += 1
+            continue
+
+        if bool(metadata.get("brace_fallback_applied")):
+            metadata["local_cache_skip_reason"] = "brace_fallback"
+            cache_skipped += 1
+            continue
+
         if not chunk.translation.strip():
             metadata["local_cache_skip_reason"] = "empty_translation"
             cache_skipped += 1

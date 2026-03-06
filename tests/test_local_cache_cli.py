@@ -35,6 +35,8 @@ def test_cli_only_writes_cache_when_placeholder_audit_passed(tmp_path):
                 metadata={
                     "local_cache_key_hash": good_key,
                     "placeholder_audit_passed": True,
+                    "brace_audit_passed": True,
+                    "brace_fallback_applied": False,
                 },
             ),
             TranslatedChunk(
@@ -44,6 +46,8 @@ def test_cli_only_writes_cache_when_placeholder_audit_passed(tmp_path):
                 metadata={
                     "local_cache_key_hash": bad_key,
                     "placeholder_audit_passed": False,
+                    "brace_audit_passed": True,
+                    "brace_fallback_applied": False,
                 },
             ),
             TranslatedChunk(
@@ -53,6 +57,8 @@ def test_cli_only_writes_cache_when_placeholder_audit_passed(tmp_path):
                 metadata={
                     "local_cache_key_hash": fallback_key,
                     "placeholder_audit_passed": True,
+                    "brace_audit_passed": True,
+                    "brace_fallback_applied": False,
                 },
             ),
         ]
@@ -67,6 +73,64 @@ def test_cli_only_writes_cache_when_placeholder_audit_passed(tmp_path):
         assert cache.get_by_hash(good_key) == "通过审计的译文"
         assert cache.get_by_hash(bad_key) is None
         assert cache.get_by_hash(fallback_key) is None
+    finally:
+        cache.close()
+
+
+def test_cli_skips_cache_write_when_brace_audit_fails(tmp_path):
+    cache = LocalTranslationCache(cache_dir=tmp_path / "cache")
+    try:
+        bad_key = "44" * 16
+        chunk = TranslatedChunk(
+            source="s",
+            translation="brace fail",
+            chunk_id="c1",
+            metadata={
+                "local_cache_key_hash": bad_key,
+                "placeholder_audit_passed": True,
+                "brace_audit_passed": False,
+                "brace_fallback_applied": False,
+            },
+        )
+
+        written, skipped = _write_local_cache_after_quality_gate(
+            local_cache=cache,
+            translated_chunks=[chunk],
+            missing_fallback_ids=set(),
+        )
+        assert written == 0
+        assert skipped == 1
+        assert chunk.metadata["local_cache_skip_reason"] == "brace_audit_failed"
+        assert cache.get_by_hash(bad_key) is None
+    finally:
+        cache.close()
+
+
+def test_cli_skips_cache_write_when_brace_fallback_applied(tmp_path):
+    cache = LocalTranslationCache(cache_dir=tmp_path / "cache")
+    try:
+        bad_key = "55" * 16
+        chunk = TranslatedChunk(
+            source="s",
+            translation="fallback",
+            chunk_id="c1",
+            metadata={
+                "local_cache_key_hash": bad_key,
+                "placeholder_audit_passed": True,
+                "brace_audit_passed": True,
+                "brace_fallback_applied": True,
+            },
+        )
+
+        written, skipped = _write_local_cache_after_quality_gate(
+            local_cache=cache,
+            translated_chunks=[chunk],
+            missing_fallback_ids=set(),
+        )
+        assert written == 0
+        assert skipped == 1
+        assert chunk.metadata["local_cache_skip_reason"] == "brace_fallback"
+        assert cache.get_by_hash(bad_key) is None
     finally:
         cache.close()
 

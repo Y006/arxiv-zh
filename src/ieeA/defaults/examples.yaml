@@ -43,3 +43,9 @@ examples:
       Return in JSON format: \{\{"result": "$\langle$value$\rangle$"\}\}
     target: |
       以 JSON 格式返回：\{\{"result": "$\langle$value$\rangle$"\}\}
+
+  # Example 8: 转义花括号结构（保持 \{ \} 不变）
+  - source: |
+      Tool call payload: \{"name": "search", "arguments": \{"query": ["graph neural network"]\}\}
+    target: |
+      工具调用载荷：\{"name": "search", "arguments": \{"query": ["graph neural network"]\}\}

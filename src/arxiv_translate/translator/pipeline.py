@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from ..cache.key_builder import CacheKeyBuilder
 from ..cache.local_translation_cache import LocalTranslationCache
 from ..rules.glossary import Glossary
+from ..validator.rules import BuiltInRules
 from .llm_base import LLMProvider
 from .prompts import build_batch_translation_text, build_system_prompt
 
@@ -243,6 +244,130 @@ class TranslationPipeline:
             "passed": not missing and not spurious,
             "missing": missing,
             "spurious": spurious,
+        }
+
+    @staticmethod
+    def _is_escaped_brace_char(text: str, index: int) -> bool:
+        backslash_count = 0
+        cursor = index - 1
+        while cursor >= 0 and text[cursor] == "\\":
+            backslash_count += 1
+            cursor -= 1
+        return backslash_count % 2 == 1
+
+    def _collect_braces_with_escape(self, text: str) -> List[Dict[str, Any]]:
+        braces: List[Dict[str, Any]] = []
+        for idx, ch in enumerate(text):
+            if ch not in "{}":
+                continue
+            braces.append(
+                {
+                    "char": ch,
+                    "index": idx,
+                    "escaped": self._is_escaped_brace_char(text, idx),
+                }
+            )
+        return braces
+
+    def _repair_brace_escape_drift(
+        self,
+        source: str,
+        translation: str,
+    ) -> tuple[str, Dict[str, Any]]:
+        source_braces = self._collect_braces_with_escape(source)
+        translation_braces = self._collect_braces_with_escape(translation)
+
+        if len(source_braces) != len(translation_braces):
+            return translation, {
+                "can_repair": False,
+                "applied": False,
+                "edit_count": 0,
+                "reason": "brace_count_mismatch",
+            }
+
+        for source_item, translation_item in zip(source_braces, translation_braces):
+            if source_item["char"] != translation_item["char"]:
+                return translation, {
+                    "can_repair": False,
+                    "applied": False,
+                    "edit_count": 0,
+                    "reason": "brace_order_mismatch",
+                }
+
+        chars = list(translation)
+        edit_count = 0
+
+        for source_item, translation_item in zip(
+            reversed(source_braces),
+            reversed(translation_braces),
+        ):
+            source_escaped = bool(source_item["escaped"])
+            translation_escaped = bool(translation_item["escaped"])
+            brace_index = int(translation_item["index"])
+
+            if source_escaped and not translation_escaped:
+                chars.insert(brace_index, "\\")
+                edit_count += 1
+            elif not source_escaped and translation_escaped:
+                remove_idx = brace_index - 1
+                if remove_idx < 0 or chars[remove_idx] != "\\":
+                    return translation, {
+                        "can_repair": False,
+                        "applied": False,
+                        "edit_count": 0,
+                        "reason": "brace_unescape_failed",
+                    }
+                del chars[remove_idx]
+                edit_count += 1
+
+        return "".join(chars), {
+            "can_repair": True,
+            "applied": edit_count > 0,
+            "edit_count": edit_count,
+            "reason": None,
+        }
+
+    def _audit_and_repair_brace_structure(
+        self,
+        source: str,
+        translation: str,
+    ) -> tuple[str, Dict[str, Any]]:
+        mismatch_before = BuiltInRules._find_first_brace_structure_mismatch(
+            source,
+            translation,
+        )
+        if mismatch_before is None:
+            return translation, {
+                "passed": True,
+                "repairable_escape_drift": False,
+                "repair_attempted": False,
+                "repair_applied": False,
+                "edit_count": 0,
+                "reason": None,
+                "mismatch": None,
+            }
+
+        repaired_translation, repair_meta = self._repair_brace_escape_drift(
+            source,
+            translation,
+        )
+        mismatch_after = BuiltInRules._find_first_brace_structure_mismatch(
+            source,
+            repaired_translation,
+        )
+        passed = mismatch_after is None
+        reason = None
+        if not passed:
+            reason = repair_meta.get("reason") or "brace_structure_mismatch"
+
+        return repaired_translation, {
+            "passed": passed,
+            "repairable_escape_drift": bool(repair_meta.get("can_repair")),
+            "repair_attempted": bool(repair_meta.get("can_repair")),
+            "repair_applied": bool(repair_meta.get("applied")),
+            "edit_count": int(repair_meta.get("edit_count", 0)),
+            "reason": reason,
+            "mismatch": mismatch_after,
         }
 
     def _build_local_cache_payload(
@@ -957,72 +1082,150 @@ class TranslationPipeline:
                 return set()
 
             attempts: Dict[str, int] = {chunk_id: 1 for chunk_id in translatable_ids}
-            latest_audits: Dict[str, Dict[str, Any]] = {}
+            latest_placeholder_audits: Dict[str, Dict[str, Any]] = {}
+            latest_brace_audits: Dict[str, Dict[str, Any]] = {}
 
+            def _audit_quality_for_chunk(chunk_id: str) -> tuple[bool, bool]:
+                source_text = translatable_chunk_map[chunk_id]["content"]
+                translated_chunk = results_map[chunk_id]
+
+                repaired_translation, brace_audit = self._audit_and_repair_brace_structure(
+                    source_text,
+                    translated_chunk.translation,
+                )
+                if repaired_translation != translated_chunk.translation:
+                    translated_chunk.translation = repaired_translation
+                latest_brace_audits[chunk_id] = brace_audit
+
+                placeholder_audit = self._audit_placeholder_alignment(
+                    source_text,
+                    translated_chunk.translation,
+                )
+                latest_placeholder_audits[chunk_id] = placeholder_audit
+                return (not placeholder_audit["passed"], not brace_audit["passed"])
+
+            failed_placeholder_ids: Set[str] = set()
+            failed_brace_ids: Set[str] = set()
             failed_ids: Set[str] = set()
             for chunk_id in translatable_ids:
-                audit = self._audit_placeholder_alignment(
-                    translatable_chunk_map[chunk_id]["content"],
-                    results_map[chunk_id].translation,
-                )
-                latest_audits[chunk_id] = audit
-                if not audit["passed"]:
+                placeholder_failed, brace_failed = _audit_quality_for_chunk(chunk_id)
+                if placeholder_failed:
+                    failed_placeholder_ids.add(chunk_id)
+                if brace_failed:
+                    failed_brace_ids.add(chunk_id)
+                if placeholder_failed or brace_failed:
                     failed_ids.add(chunk_id)
 
             print(
-                f"round 1 placeholder audit: failed {len(failed_ids)} / total {len(translatable_ids)}"
+                f"round 1 placeholder audit: failed {len(failed_placeholder_ids)} / total {len(translatable_ids)}"
+            )
+            print(
+                f"round 1 brace audit: failed {len(failed_brace_ids)} / total {len(translatable_ids)}"
             )
 
             for round_index in range(2, self.PLACEHOLDER_RETRY_MAX_ATTEMPTS + 1):
                 if not failed_ids:
                     break
 
-                retry_inputs = [translatable_chunk_map[cid] for cid in translatable_ids if cid in failed_ids]
+                retry_inputs = [
+                    translatable_chunk_map[cid]
+                    for cid in translatable_ids
+                    if cid in failed_ids
+                ]
                 retry_results = await _translate_retry_round(retry_inputs, round_index)
                 for chunk_id, retry_chunk in retry_results.items():
                     results_map[chunk_id] = retry_chunk
                     attempts[chunk_id] = round_index
 
+                next_failed_placeholder: Set[str] = set()
+                next_failed_brace: Set[str] = set()
                 next_failed: Set[str] = set()
                 for chunk_id in failed_ids:
-                    audit = self._audit_placeholder_alignment(
-                        translatable_chunk_map[chunk_id]["content"],
-                        results_map[chunk_id].translation,
-                    )
-                    latest_audits[chunk_id] = audit
-                    if not audit["passed"]:
+                    placeholder_failed, brace_failed = _audit_quality_for_chunk(chunk_id)
+                    if placeholder_failed:
+                        next_failed_placeholder.add(chunk_id)
+                    if brace_failed:
+                        next_failed_brace.add(chunk_id)
+                    if placeholder_failed or brace_failed:
                         next_failed.add(chunk_id)
 
+                failed_placeholder_ids = next_failed_placeholder
+                failed_brace_ids = next_failed_brace
                 failed_ids = next_failed
                 print(
-                    f"round {round_index} placeholder audit: failed {len(failed_ids)} / total {len(translatable_ids)}"
+                    f"round {round_index} placeholder audit: failed {len(failed_placeholder_ids)} / total {len(translatable_ids)}"
+                )
+                print(
+                    f"round {round_index} brace audit: failed {len(failed_brace_ids)} / total {len(translatable_ids)}"
                 )
 
-            exhausted_ids = set(failed_ids)
+            exhausted_placeholder_ids = set(failed_placeholder_ids)
+            exhausted_brace_ids = set(failed_brace_ids)
+            brace_fallback_ids: Set[str] = set()
+            for chunk_id in exhausted_brace_ids:
+                source_text = translatable_chunk_map[chunk_id]["content"]
+                if results_map[chunk_id].translation != source_text:
+                    brace_fallback_ids.add(chunk_id)
+                results_map[chunk_id].translation = source_text
+                _, brace_audit = self._audit_and_repair_brace_structure(
+                    source_text,
+                    results_map[chunk_id].translation,
+                )
+                latest_brace_audits[chunk_id] = brace_audit
+                latest_placeholder_audits[chunk_id] = self._audit_placeholder_alignment(
+                    source_text,
+                    results_map[chunk_id].translation,
+                )
+
             for chunk_id in translatable_ids:
-                audit = latest_audits.get(chunk_id) or self._audit_placeholder_alignment(
+                placeholder_audit = latest_placeholder_audits.get(
+                    chunk_id
+                ) or self._audit_placeholder_alignment(
                     translatable_chunk_map[chunk_id]["content"],
                     results_map[chunk_id].translation,
                 )
-                is_exhausted = chunk_id in exhausted_ids
+                brace_audit = latest_brace_audits.get(chunk_id) or {
+                    "passed": True,
+                    "repair_applied": False,
+                    "edit_count": 0,
+                    "reason": None,
+                }
+                is_placeholder_exhausted = chunk_id in exhausted_placeholder_ids
+                is_brace_exhausted = chunk_id in exhausted_brace_ids
                 results_map[chunk_id].metadata.update(
                     {
                         "placeholder_attempt": attempts.get(chunk_id, 1),
-                        "placeholder_audit_passed": bool(audit["passed"]),
-                        "placeholder_missing": list(audit["missing"]),
-                        "placeholder_spurious": list(audit["spurious"]),
-                        "placeholder_retry_exhausted": is_exhausted,
-                        "placeholder_warning_emitted": is_exhausted,
+                        "placeholder_audit_passed": bool(placeholder_audit["passed"]),
+                        "placeholder_missing": list(placeholder_audit["missing"]),
+                        "placeholder_spurious": list(placeholder_audit["spurious"]),
+                        "placeholder_retry_exhausted": is_placeholder_exhausted,
+                        "placeholder_warning_emitted": is_placeholder_exhausted,
+                        "brace_audit_passed": bool(brace_audit["passed"]),
+                        "brace_fix_applied": bool(brace_audit.get("repair_applied")),
+                        "brace_fix_edit_count": int(brace_audit.get("edit_count", 0)),
+                        "brace_retry_exhausted": is_brace_exhausted,
+                        "brace_fallback_applied": chunk_id in brace_fallback_ids,
+                        "brace_mismatch_reason": brace_audit.get("reason"),
                     }
                 )
 
-            if exhausted_ids:
-                exhausted_prefixes = ", ".join(sorted(chunk_id[:8] for chunk_id in exhausted_ids))
+            if exhausted_placeholder_ids:
+                exhausted_prefixes = ", ".join(
+                    sorted(chunk_id[:8] for chunk_id in exhausted_placeholder_ids)
+                )
                 print(
-                    f"[WARNING] placeholder retry exhausted: {len(exhausted_ids)} chunks ({exhausted_prefixes})"
+                    f"[WARNING] placeholder retry exhausted: {len(exhausted_placeholder_ids)} chunks ({exhausted_prefixes})"
                 )
 
-            return exhausted_ids
+            if exhausted_brace_ids:
+                exhausted_prefixes = ", ".join(
+                    sorted(chunk_id[:8] for chunk_id in exhausted_brace_ids)
+                )
+                print(
+                    f"[WARNING] brace retry exhausted: {len(exhausted_brace_ids)} chunks ({exhausted_prefixes}); fallback to source applied"
+                )
+
+            return exhausted_placeholder_ids
 
         def _refresh_state_from_results_map() -> None:
             state["completed"] = [

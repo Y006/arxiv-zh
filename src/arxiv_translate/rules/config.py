@@ -62,6 +62,7 @@ class FontConfig(BaseModel):
     main: Optional[str] = None
     sans: Optional[str] = None
     mono: Optional[str] = None
+    dir: Optional[str] = None
     auto_detect: bool = True
 
 

@@ -618,7 +618,10 @@ def translate(
                     console=console,
                 ) as progress:
                     task = progress.add_task("Compiling PDF...", total=None)
-                    compiler = LaTeXCompiler(timeout=config.compilation.timeout)
+                    compiler = LaTeXCompiler(
+                        timeout=config.compilation.timeout,
+                        fonts_dir=config.fonts.dir,
+                    )
                     compile_error: Optional[str] = None
                     try:
                         latex_source = out_file.read_text(encoding="utf-8")

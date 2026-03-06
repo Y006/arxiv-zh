@@ -5,7 +5,7 @@ import tempfile
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from .chinese_support import inject_chinese_support
 
@@ -20,10 +20,11 @@ class CompilationResult:
 
 
 class LaTeXCompiler:
-    def __init__(self, timeout: int = 120):
+    def __init__(self, timeout: int = 120, fonts_dir: Optional[Union[str, Path]] = None):
         self.timeout = timeout
         # Priority: xelatex (best CJK), lualatex (good CJK), pdflatex (fallback)
         self.engines = ["xelatex", "lualatex", "pdflatex"]
+        self.fonts_dir = Path(fonts_dir).resolve() if fonts_dir else None
 
     def inject_chinese_support(self, latex_source: str) -> str:
         """Wrapper around the injection logic."""
@@ -61,6 +62,13 @@ class LaTeXCompiler:
             last_error = None
             last_log = None
             applied_fallback_reasons = set()
+            engine_failures: List[Tuple[str, Optional[str], str]] = []
+            failure_rank: Dict[str, int] = {
+                "fontspec": 0,
+                "package": 1,
+                "latex": 2,
+                "unknown": 3,
+            }
 
             for _round in range(3):
                 source_file.write_text(compile_source, encoding="utf-8")
@@ -99,6 +107,9 @@ class LaTeXCompiler:
 
                     last_log = log
                     last_error = error
+                    if error:
+                        error_tag = self._classify_error_text(error)
+                        engine_failures.append((engine, error, error_tag))
                     if missing_font is None:
                         missing_font = self._extract_missing_font_name(log)
 
@@ -120,6 +131,13 @@ class LaTeXCompiler:
                 break
 
             # If we reach here, all engines failed
+            if engine_failures:
+                best_engine, best_error, _ = sorted(
+                    engine_failures,
+                    key=lambda item: failure_rank.get(item[2], 99),
+                )[0]
+                last_error = f"[{best_engine}] {best_error}"
+
             return CompilationResult(
                 success=False,
                 log_content=last_log,
@@ -233,6 +251,30 @@ class LaTeXCompiler:
         if not main_font:
             return latex_source, "no_fallback"
 
+        if main_font.lower() == missing_key:
+            patched_source = latex_source
+            patched_source = re.sub(
+                r"^[ \t]*\\setCJKmainfont(?:\[[^\]]*\])?\{[^}]*\}[ \t]*\n?",
+                "",
+                patched_source,
+                flags=re.MULTILINE,
+            )
+            patched_source = re.sub(
+                r"^[ \t]*\\setCJKsansfont(?:\[[^\]]*\])?\{[^}]*\}[ \t]*\n?",
+                "",
+                patched_source,
+                flags=re.MULTILINE,
+            )
+            patched_source = re.sub(
+                r"^[ \t]*\\setCJKmonofont(?:\[[^\]]*\])?\{[^}]*\}[ \t]*\n?",
+                "",
+                patched_source,
+                flags=re.MULTILINE,
+            )
+            if patched_source != latex_source:
+                return patched_source, "fallback_remove_explicit_cjk_fonts"
+            return latex_source, "no_fallback"
+
         sans_match = re.search(
             r"\\setCJKsansfont(?:\[[^\]]*\])?\{([^}]*)\}",
             latex_source,
@@ -305,6 +347,16 @@ class LaTeXCompiler:
             except Exception:
                 pass
 
+            env = os.environ.copy()
+            if self.fonts_dir and self.fonts_dir.exists():
+                existing_font_dirs = env.get("OSFONTDIR", "").strip()
+                if existing_font_dirs:
+                    env["OSFONTDIR"] = (
+                        f"{str(self.fonts_dir)}{os.pathsep}{existing_font_dirs}"
+                    )
+                else:
+                    env["OSFONTDIR"] = str(self.fonts_dir)
+
             process = subprocess.run(
                 cmd,
                 cwd=cwd,
@@ -313,6 +365,7 @@ class LaTeXCompiler:
                 timeout=self.timeout,
                 encoding="utf-8",
                 errors="replace",
+                env=env,
             )
 
             # Read log file if it exists, as it's more complete than stdout
@@ -364,6 +417,17 @@ class LaTeXCompiler:
             return "Fatal error detected in logs"
 
         return "Unknown error (check full logs)"
+
+    @staticmethod
+    def _classify_error_text(error_text: str) -> str:
+        lowered = str(error_text).lower()
+        if "fontspec" in lowered:
+            return "fontspec"
+        if "package" in lowered:
+            return "package"
+        if "latex error" in lowered or lowered.startswith("!"):
+            return "latex"
+        return "unknown"
 
     def _is_pdf_healthy(self, pdf_file: Path) -> bool:
         """Basic PDF health check: file exists, has %PDF header, and contains %%EOF trailer."""

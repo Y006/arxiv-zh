@@ -27,6 +27,7 @@ fonts:
   main: Source Han Serif SC
   sans: Source Han Sans SC
   mono: Source Han Mono SC
+  dir: fonts
 
 translation:
   quality_mode: standard

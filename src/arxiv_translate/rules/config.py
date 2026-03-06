@@ -82,6 +82,14 @@ class ParserConfig(BaseModel):
     extra_translatable_environments: List[str] = Field(default_factory=list)
 
 
+class CacheConfig(BaseModel):
+    enabled: bool = True
+    max_size_mb: int = 2048
+    ttl_days: int = 30
+    compression: str = "zstd"
+    key_mode: str = "relaxed_chunk"
+
+
 class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     compilation: CompilationConfig = Field(default_factory=CompilationConfig)
@@ -89,6 +97,7 @@ class Config(BaseModel):
     fonts: FontConfig = Field(default_factory=FontConfig)
     translation: TranslationConfig = Field(default_factory=TranslationConfig)
     parser: ParserConfig = Field(default_factory=ParserConfig)
+    cache: CacheConfig = Field(default_factory=CacheConfig)
 
 
 def load_defaults() -> Dict[str, Any]:

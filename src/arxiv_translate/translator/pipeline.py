@@ -9,6 +9,8 @@ from typing import Optional, Dict, List, Any, Union, Callable, Set, cast
 
 from pydantic import BaseModel, Field
 
+from ..cache.key_builder import CacheKeyBuilder
+from ..cache.local_translation_cache import LocalTranslationCache
 from ..rules.glossary import Glossary
 from .llm_base import LLMProvider
 from .prompts import build_batch_translation_text, build_system_prompt
@@ -62,6 +64,9 @@ class TranslationPipeline:
         sequential_mode: bool = False,
         request_timeout: float = 120.0,
         per_call_timeout: float = 150.0,
+        local_cache: Optional[LocalTranslationCache] = None,
+        cache_key_builder: Optional[CacheKeyBuilder] = None,
+        cache_key_mode: str = "relaxed_chunk",
     ):
         self.provider = provider
         self.glossary = glossary or Glossary()
@@ -79,6 +84,11 @@ class TranslationPipeline:
         self.sequential_mode = sequential_mode
         self.request_timeout = request_timeout
         self.per_call_timeout = per_call_timeout
+        self.local_cache = local_cache
+        self.cache_key_builder = cache_key_builder or CacheKeyBuilder(
+            key_mode=cache_key_mode
+        )
+        self.cache_key_mode = cache_key_mode
         self._started_at: Optional[str] = None
         self._last_provider_cache_meta: Optional[Dict[str, Any]] = None
 
@@ -234,6 +244,27 @@ class TranslationPipeline:
             "missing": missing,
             "spurious": spurious,
         }
+
+    def _build_local_cache_payload(
+        self,
+        *,
+        source_text: str,
+        glossary_hints: Dict[str, str],
+        merged_context: Optional[str],
+    ) -> Dict[str, Any]:
+        return self.cache_key_builder.build_payload(
+            source_text=source_text,
+            prompt_variant_semantic=self.cache_key_mode,
+            glossary_hints=glossary_hints,
+            context=merged_context,
+            few_shot_examples=self.few_shot_examples,
+            custom_system_prompt=self.custom_system_prompt,
+            key_mode=self.cache_key_mode,
+        )
+
+    @staticmethod
+    def _local_cache_key_preview(key_hash_hex: str) -> str:
+        return key_hash_hex[:12]
 
     async def _call_with_retry(
         self,
@@ -551,14 +582,14 @@ class TranslationPipeline:
 
         placeholder_pattern = re.compile(r"^\[\[[A-Z_]+_\d+\]\]$")
         placeholder_chunks = []
-        translatable_chunks = []
+        all_translatable_chunks = []
 
         for c in chunks:
             if c["chunk_id"] not in completed_ids:
                 if placeholder_pattern.fullmatch(c["content"].strip()):
                     placeholder_chunks.append(c)
                 else:
-                    translatable_chunks.append(c)
+                    all_translatable_chunks.append(c)
 
         for chunk_data in placeholder_chunks:
             chunk_id = chunk_data["chunk_id"]
@@ -574,12 +605,12 @@ class TranslationPipeline:
             state["completed"].append(chunk_id)
             state["results"].append(placeholder_result.model_dump())
 
-        if not translatable_chunks:
+        if not all_translatable_chunks:
             self._save_state(state, total_chunks=len(chunks))
             return [results_map[chunk_data["chunk_id"]] for chunk_data in chunks]
 
         # --- Document-level glossary + pre-built system prompts ---
-        all_text = " ".join(c["content"] for c in translatable_chunks)
+        all_text = " ".join(c["content"] for c in all_translatable_chunks)
         doc_glossary = self._build_glossary_hints(all_text)
 
         # Merge abstract context (same logic as translate_chunk)
@@ -591,6 +622,65 @@ class TranslationPipeline:
                 )
             else:
                 merged_context = f"Document Abstract:\n{self.abstract_context}"
+
+        local_cache_key_map: Dict[str, str] = {}
+        translatable_chunks = []
+        local_cache_hit_count = 0
+
+        if self.local_cache is not None:
+            try:
+                for chunk_data in all_translatable_chunks:
+                    key_payload = self._build_local_cache_payload(
+                        source_text=chunk_data["content"],
+                        glossary_hints=doc_glossary,
+                        merged_context=merged_context,
+                    )
+                    key_hash_hex = self.cache_key_builder.hash_payload_hex(key_payload)
+                    local_cache_key_map[chunk_data["chunk_id"]] = key_hash_hex
+                    cached_translation = self.local_cache.get(
+                        key_payload, key_hash_hex=key_hash_hex
+                    )
+                    if cached_translation is None:
+                        translatable_chunks.append(chunk_data)
+                        continue
+
+                    local_cache_hit_count += 1
+                    cached_chunk = TranslatedChunk(
+                        source=chunk_data["content"],
+                        translation=cached_translation,
+                        chunk_id=chunk_data["chunk_id"],
+                        metadata={
+                            "source_length": len(chunk_data["content"]),
+                            "batched": False,
+                            "batch_id": None,
+                            "skipped_placeholder": False,
+                            "local_cache_hit": True,
+                            "local_cache_key": self._local_cache_key_preview(
+                                key_hash_hex
+                            ),
+                            "local_cache_key_hash": key_hash_hex,
+                            "local_cache_written": False,
+                            "local_cache_skip_reason": None,
+                        },
+                    )
+                    results_map[cached_chunk.chunk_id] = cached_chunk
+                    state["completed"].append(cached_chunk.chunk_id)
+                    state["results"].append(cached_chunk.model_dump())
+            except Exception as e:
+                print(f"[LOCAL CACHE] disabled due to read error: {e}")
+                translatable_chunks = list(all_translatable_chunks)
+                local_cache_key_map = {}
+        else:
+            translatable_chunks = list(all_translatable_chunks)
+
+        if local_cache_hit_count > 0:
+            print(
+                f"[LOCAL CACHE] hits={local_cache_hit_count} misses={len(translatable_chunks)}"
+            )
+
+        if not translatable_chunks:
+            self._save_state(state, total_chunks=len(chunks))
+            return [results_map[chunk_data["chunk_id"]] for chunk_data in chunks]
 
         # Pre-build individual system prompt (for long_chunks)
         individual_system_prompt = build_system_prompt(
@@ -616,6 +706,18 @@ class TranslationPipeline:
 
         self.provider._prebuilt_system_prompt = individual_system_prompt  # type: ignore[attr-defined]
         self.provider._prebuilt_batch_prompt = batch_system_prompt  # type: ignore[attr-defined]
+
+        def _attach_local_cache_metadata(chunk_result: TranslatedChunk) -> None:
+            key_hash_hex = local_cache_key_map.get(chunk_result.chunk_id)
+            if key_hash_hex is None:
+                return
+            chunk_result.metadata.setdefault("local_cache_hit", False)
+            chunk_result.metadata["local_cache_key"] = self._local_cache_key_preview(
+                key_hash_hex
+            )
+            chunk_result.metadata["local_cache_key_hash"] = key_hash_hex
+            chunk_result.metadata.setdefault("local_cache_written", False)
+            chunk_result.metadata.setdefault("local_cache_skip_reason", None)
 
         SHORT_THRESHOLD = self.batch_short_threshold
         MAX_BATCH_CHARS = self.batch_max_chars
@@ -663,9 +765,11 @@ class TranslationPipeline:
             batch_stats_callback(len(batches), len(long_chunks), total_api_calls)
 
         translatable_chunk_map = {
-            chunk_data["chunk_id"]: chunk_data for chunk_data in translatable_chunks
+            chunk_data["chunk_id"]: chunk_data for chunk_data in all_translatable_chunks
         }
-        translatable_ids = [chunk_data["chunk_id"] for chunk_data in translatable_chunks]
+        translatable_ids = [
+            chunk_data["chunk_id"] for chunk_data in all_translatable_chunks
+        ]
 
         def _split_for_retry_round(
             retry_chunks: List[Dict[str, str]],
@@ -744,6 +848,7 @@ class TranslationPipeline:
                     for chunk_result in batch_results:
                         chunk_result.metadata["batch_id"] = batch_id
                         chunk_result.metadata["retry_round"] = round_index
+                        _attach_local_cache_metadata(chunk_result)
                         round_results[chunk_result.chunk_id] = chunk_result
 
                 for chunk_data in retry_long_chunks:
@@ -756,6 +861,7 @@ class TranslationPipeline:
                     except Exception as e:
                         chunk_result = _make_skipped_chunk(chunk_data, e)
                     chunk_result.metadata["retry_round"] = round_index
+                    _attach_local_cache_metadata(chunk_result)
                     round_results[chunk_result.chunk_id] = chunk_result
 
                 return round_results
@@ -815,6 +921,7 @@ class TranslationPipeline:
                 for chunk_result in batch_results:
                     chunk_result.metadata["batch_id"] = batch_id
                     chunk_result.metadata["retry_round"] = round_index
+                    _attach_local_cache_metadata(chunk_result)
 
                 return batch_results
 
@@ -836,9 +943,11 @@ class TranslationPipeline:
                     continue
                 if isinstance(item, list):
                     for chunk_result in item:
+                        _attach_local_cache_metadata(chunk_result)
                         round_results[chunk_result.chunk_id] = chunk_result
                 else:
                     chunk_result = cast(TranslatedChunk, item)
+                    _attach_local_cache_metadata(chunk_result)
                     round_results[chunk_result.chunk_id] = chunk_result
 
             return round_results
@@ -929,8 +1038,13 @@ class TranslationPipeline:
 
         # --- SEQUENTIAL EXECUTION PATH ---
         if self.sequential_mode:
-            completed_count = 0
-            total_pending = len(translatable_chunks)
+            completed_count = local_cache_hit_count
+            total_pending = len(all_translatable_chunks)
+            if progress_callback and local_cache_hit_count > 0:
+                try:
+                    progress_callback(completed_count, total_pending)
+                except Exception:
+                    pass
 
             for i, batch in enumerate(batches):
                 batch_id = f"batch_{i}"
@@ -960,6 +1074,7 @@ class TranslationPipeline:
 
                 for r in batch_results:
                     r.metadata["batch_id"] = batch_id
+                    _attach_local_cache_metadata(r)
                     results_map[r.chunk_id] = r
                     state["completed"].append(r.chunk_id)
                     state["results"].append(r.model_dump())
@@ -978,6 +1093,7 @@ class TranslationPipeline:
                     chunk_id=chunk_data["chunk_id"],
                     context=context,
                 )
+                _attach_local_cache_metadata(result)
                 results_map[result.chunk_id] = result
                 state["completed"].append(result.chunk_id)
                 state["results"].append(result.model_dump())
@@ -1007,9 +1123,14 @@ class TranslationPipeline:
 
         # --- CONCURRENT EXECUTION PATH (existing, unchanged) ---
         semaphore = asyncio.Semaphore(max_concurrent)
-        completed_count = 0
+        completed_count = local_cache_hit_count
         progress_lock = asyncio.Lock()
-        total_pending = len(translatable_chunks)
+        total_pending = len(all_translatable_chunks)
+        if progress_callback and local_cache_hit_count > 0:
+            try:
+                progress_callback(completed_count, total_pending)
+            except Exception:
+                pass
 
         def _is_fatal_base_exception(error: BaseException) -> bool:
             return isinstance(error, (KeyboardInterrupt, SystemExit))
@@ -1064,16 +1185,20 @@ class TranslationPipeline:
                                 "batch_id": batch_id,
                             },
                         )
+                        _attach_local_cache_metadata(skipped_chunk)
                         batch_results.append(skipped_chunk)
                     elif isinstance(result, BaseException):
                         raise result
                     else:
-                        batch_results.append(cast(TranslatedChunk, result))
+                        chunk_result = cast(TranslatedChunk, result)
+                        _attach_local_cache_metadata(chunk_result)
+                        batch_results.append(chunk_result)
 
             # Mark all chunks with batch_id
             for r in batch_results:
                 if "batch_id" not in r.metadata or not r.metadata["batch_id"]:
                     r.metadata["batch_id"] = batch_id
+                _attach_local_cache_metadata(r)
 
             async with progress_lock:
                 completed_count += len(batch_chunks)
@@ -1095,6 +1220,7 @@ class TranslationPipeline:
                         chunk_id=chunk_data["chunk_id"],
                         context=context,
                     )
+                    _attach_local_cache_metadata(result)
 
                     nonlocal completed_count
                     async with progress_lock:
@@ -1120,6 +1246,7 @@ class TranslationPipeline:
                         "skipped_at": datetime.now().isoformat(),
                     },
                 )
+                _attach_local_cache_metadata(skipped_chunk)
                 async with progress_lock:
                     completed_count += 1
                     if progress_callback:
@@ -1178,6 +1305,7 @@ class TranslationPipeline:
                                 "skipped_at": datetime.now().isoformat(),
                             },
                         )
+                        _attach_local_cache_metadata(skipped_chunk)
                         results_map[chunk_data["chunk_id"]] = skipped_chunk
                         state["completed"].append(chunk_data["chunk_id"])
                         state["results"].append(skipped_chunk.model_dump())
@@ -1195,6 +1323,7 @@ class TranslationPipeline:
                             "skipped_at": datetime.now().isoformat(),
                         },
                     )
+                    _attach_local_cache_metadata(skipped_chunk)
                     results_map[chunk_data["chunk_id"]] = skipped_chunk
                     state["completed"].append(chunk_data["chunk_id"])
                     state["results"].append(skipped_chunk.model_dump())
@@ -1206,11 +1335,13 @@ class TranslationPipeline:
             if i < len(batches):
                 batch_results = cast(List[TranslatedChunk], result)
                 for translated_chunk in batch_results:
+                    _attach_local_cache_metadata(translated_chunk)
                     results_map[translated_chunk.chunk_id] = translated_chunk
                     state["completed"].append(translated_chunk.chunk_id)
                     state["results"].append(translated_chunk.model_dump())
             else:
                 success_result = cast(TranslatedChunk, result)
+                _attach_local_cache_metadata(success_result)
                 results_map[success_result.chunk_id] = success_result
                 state["completed"].append(success_result.chunk_id)
                 state["results"].append(success_result.model_dump())

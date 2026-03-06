@@ -31,6 +31,7 @@ dependencies = [
   "pydantic",
   "requests",
   "openai>=1.0.0",
+  "zstandard>=0.23.0",
 ]
 
 [project.optional-dependencies]

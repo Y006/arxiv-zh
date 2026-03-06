@@ -16,8 +16,8 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 from rich.table import Table
-from rich.text import Text
 
+from arxiv_translate.cache.local_translation_cache import LocalTranslationCache
 from arxiv_translate.compiler import LaTeXCompiler
 from arxiv_translate.downloader.arxiv import ArxivDownloader
 from arxiv_translate.parser.latex_parser import LaTeXParser
@@ -42,8 +42,10 @@ app = typer.Typer(
 )
 config_app = typer.Typer(help="Manage configuration")
 glossary_app = typer.Typer(help="Manage glossary terms")
+cache_app = typer.Typer(help="Manage local translation cache")
 app.add_typer(config_app, name="config")
 app.add_typer(glossary_app, name="glossary")
+app.add_typer(cache_app, name="cache")
 
 console = Console()
 
@@ -120,6 +122,85 @@ def _validate_provider_args(
         raise typer.Exit(code=1)
 
 
+def _build_local_cache(config: Any, disabled: bool) -> Optional[LocalTranslationCache]:
+    if disabled or not getattr(config.cache, "enabled", True):
+        return None
+    cache_dir = LocalTranslationCache.resolve_cache_dir(config.paths.cache_dir)
+    return LocalTranslationCache(
+        cache_dir=cache_dir,
+        max_size_mb=config.cache.max_size_mb,
+        ttl_days=config.cache.ttl_days,
+        compression=config.cache.compression,
+        key_mode=config.cache.key_mode,
+    )
+
+
+def _write_local_cache_after_quality_gate(
+    *,
+    local_cache: Optional[LocalTranslationCache],
+    translated_chunks: list[TranslatedChunk],
+    missing_fallback_ids: set[str],
+) -> tuple[int, int]:
+    if local_cache is None:
+        return (0, 0)
+
+    cache_written = 0
+    cache_skipped = 0
+
+    for chunk in translated_chunks:
+        metadata = chunk.metadata
+        metadata.setdefault("local_cache_written", False)
+        metadata.setdefault("local_cache_skip_reason", None)
+
+        if metadata.get("local_cache_hit"):
+            metadata["local_cache_skip_reason"] = "cache_hit"
+            cache_skipped += 1
+            continue
+
+        key_hash = str(metadata.get("local_cache_key_hash") or "")
+        if not key_hash:
+            metadata["local_cache_skip_reason"] = "missing_cache_key"
+            cache_skipped += 1
+            continue
+
+        if metadata.get("skipped") or metadata.get("skipped_placeholder"):
+            metadata["local_cache_skip_reason"] = "skipped_chunk"
+            cache_skipped += 1
+            continue
+
+        if chunk.chunk_id in missing_fallback_ids:
+            metadata["local_cache_skip_reason"] = "missing_fallback"
+            cache_skipped += 1
+            continue
+
+        if not bool(metadata.get("placeholder_audit_passed")):
+            metadata["local_cache_skip_reason"] = "placeholder_audit_failed"
+            cache_skipped += 1
+            continue
+
+        if not chunk.translation.strip():
+            metadata["local_cache_skip_reason"] = "empty_translation"
+            cache_skipped += 1
+            continue
+
+        try:
+            wrote = local_cache.put_by_hash(key_hash, chunk.translation)
+        except Exception as e:
+            metadata["local_cache_skip_reason"] = f"cache_write_error:{e}"
+            cache_skipped += 1
+            continue
+
+        if wrote:
+            metadata["local_cache_written"] = True
+            metadata["local_cache_skip_reason"] = None
+            cache_written += 1
+        else:
+            metadata["local_cache_skip_reason"] = "cache_write_rejected"
+            cache_skipped += 1
+
+    return (cache_written, cache_skipped)
+
+
 @app.command()
 def translate(
     arxiv_url: str = typer.Argument(..., help="arXiv ID or URL to translate"),
@@ -149,6 +230,11 @@ def translate(
     ),
     abstract: Optional[str] = typer.Option(
         None, "--abstract", help="手动提供摘要文本（覆盖自动提取）"
+    ),
+    no_local_cache: bool = typer.Option(
+        False,
+        "--no-local-cache",
+        help="Disable local persistent translation cache for this run",
     ),
 ):
     """
@@ -180,6 +266,7 @@ def translate(
     )
 
     async def run_pipeline():
+        local_cache: Optional[LocalTranslationCache] = None
         try:
             # 1. Download
             with Progress(
@@ -240,6 +327,17 @@ def translate(
                 endpoint=endpoint_val,
                 **provider_kwargs,
             )
+            try:
+                local_cache = _build_local_cache(config, no_local_cache)
+                if local_cache is not None:
+                    console.print(
+                        f"[cyan]Local cache enabled: {local_cache.db_path}[/cyan]"
+                    )
+            except Exception as e:
+                local_cache = None
+                console.print(
+                    f"[yellow]Local cache unavailable, continuing without it: {e}[/yellow]"
+                )
             reset_cache_stats = getattr(provider, "reset_cache_stats", None)
             if callable(reset_cache_stats):
                 try:
@@ -278,6 +376,8 @@ def translate(
                 batch_short_threshold=config.translation.batch_short_threshold,
                 batch_max_chars=config.translation.batch_max_chars,
                 sequential_mode=(sdk_name in ("openai-coding", "anthropic-coding")),
+                local_cache=local_cache,
+                cache_key_mode=config.cache.key_mode,
             )
 
             chunk_data = [{"chunk_id": c.id, "content": c.content} for c in doc.chunks]
@@ -374,6 +474,11 @@ def translate(
                 doc,
                 disable_missing_fallback_ids=disable_missing_fallback_ids,
             )
+            missing_fallback_ids = {
+                issue["chunk_id"]
+                for issue in ph_issues
+                if issue.get("type") == "missing_fallback"
+            }
 
             if ph_issues:
                 console.print(
@@ -414,6 +519,17 @@ def translate(
                 )
                 for chunk in translated_chunks
             ]
+
+            if local_cache is not None:
+                cache_written, cache_skipped = _write_local_cache_after_quality_gate(
+                    local_cache=local_cache,
+                    translated_chunks=translated_chunks_for_validation,
+                    missing_fallback_ids=missing_fallback_ids,
+                )
+                if cache_written > 0 or cache_skipped > 0:
+                    console.print(
+                        f"[cyan]Local cache write: written={cache_written}, skipped={cache_skipped}[/cyan]"
+                    )
 
             # Save
             out_file = download_result.main_tex.parent / "main_translated.tex"
@@ -488,7 +604,7 @@ def translate(
                         compile_error = str(e)
 
                     if compile_error:
-                        progress.update(task, description=f"[red]Compilation failed[/red]")
+                        progress.update(task, description="[red]Compilation failed[/red]")
                         console.print(f"[yellow]Error: {compile_error}[/yellow]")
                         console.print(
                             "[yellow]Generated .tex file is saved. You may try compiling it manually.[/yellow]"
@@ -498,6 +614,12 @@ def translate(
         except Exception as e:
             console.print(f"[bold red]Pipeline failed:[/bold red] {e}")
             raise typer.Exit(code=1)
+        finally:
+            if local_cache is not None:
+                try:
+                    local_cache.close()
+                except Exception:
+                    pass
 
     asyncio.run(run_pipeline())
 
@@ -671,6 +793,83 @@ def validate(
         console.print(f"[red]Found {len(result.errors)} errors[/red]")
         for err in result.errors:
             console.print(f"- {err.message} ({err.severity})")
+
+
+@cache_app.command("stats")
+def cache_stats():
+    """Show local translation cache stats."""
+    config = load_config()
+    try:
+        cache = _build_local_cache(config, disabled=False)
+    except Exception as e:
+        console.print(f"[red]Local cache unavailable:[/red] {e}")
+        raise typer.Exit(code=1)
+
+    if cache is None:
+        console.print("[yellow]Local cache is disabled in config.[/yellow]")
+        raise typer.Exit(code=0)
+
+    try:
+        stats = cache.stats()
+    finally:
+        cache.close()
+
+    table = Table(title="Local Translation Cache Stats")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("DB Path", stats["db_path"])
+    table.add_row("Entries", str(stats["entry_count"]))
+    table.add_row(
+        "Size",
+        f"{stats['total_size_mb']:.2f} MB / {stats['max_size_mb']:.2f} MB",
+    )
+    table.add_row("Usage", f"{stats['usage_ratio'] * 100:.2f}%")
+    table.add_row("Compression", str(stats["compression"]))
+    table.add_row("TTL", f"{stats['ttl_days']} days")
+    table.add_row("Total Hits", str(stats["total_hits"]))
+    table.add_row("Total Misses", str(stats["total_misses"]))
+    table.add_row("Hit Rate", f"{stats['hit_rate'] * 100:.2f}%")
+    table.add_row("Total Writes", str(stats["total_writes"]))
+    table.add_row("Expired Purged", str(stats["total_expired_purged"]))
+    table.add_row("LRU Evicted", str(stats["total_evicted_lru"]))
+    console.print(table)
+
+
+@cache_app.command("clear")
+def cache_clear(
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        help="Skip confirmation prompt and clear local cache directly",
+    )
+):
+    """Clear local translation cache."""
+    config = load_config()
+    try:
+        cache = _build_local_cache(config, disabled=False)
+    except Exception as e:
+        console.print(f"[red]Local cache unavailable:[/red] {e}")
+        raise typer.Exit(code=1)
+
+    if cache is None:
+        console.print("[yellow]Local cache is disabled in config.[/yellow]")
+        raise typer.Exit(code=0)
+
+    try:
+        if not yes:
+            confirmed = typer.confirm(
+                f"Clear all local cache entries at {cache.db_path}?",
+                default=False,
+            )
+            if not confirmed:
+                console.print("[yellow]Cancelled.[/yellow]")
+                raise typer.Exit(code=0)
+
+        deleted = cache.clear()
+    finally:
+        cache.close()
+
+    console.print(f"[green]Cleared local cache entries:[/green] {deleted}")
 
 
 def main():

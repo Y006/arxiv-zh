@@ -247,13 +247,17 @@ class TranslationPipeline:
         }
 
     @staticmethod
-    def _is_escaped_brace_char(text: str, index: int) -> bool:
+    def _is_escaped_char(text: str, index: int) -> bool:
         backslash_count = 0
         cursor = index - 1
         while cursor >= 0 and text[cursor] == "\\":
             backslash_count += 1
             cursor -= 1
         return backslash_count % 2 == 1
+
+    @staticmethod
+    def _is_escaped_brace_char(text: str, index: int) -> bool:
+        return TranslationPipeline._is_escaped_char(text, index)
 
     def _collect_braces_with_escape(self, text: str) -> List[Dict[str, Any]]:
         braces: List[Dict[str, Any]] = []
@@ -325,6 +329,89 @@ class TranslationPipeline:
             "applied": edit_count > 0,
             "edit_count": edit_count,
             "reason": None,
+        }
+
+    @staticmethod
+    def _split_latex_comment(line: str) -> tuple[str, str]:
+        for idx, ch in enumerate(line):
+            if ch != "%":
+                continue
+            if TranslationPipeline._is_escaped_char(line, idx):
+                continue
+            return line[:idx], line[idx:]
+        return line, ""
+
+    @staticmethod
+    def _split_trailing_newline(line: str) -> tuple[str, str]:
+        newline_match = re.search(r"(\r\n|\n|\r)$", line)
+        if not newline_match:
+            return line, ""
+        return line[: newline_match.start()], newline_match.group(1)
+
+    def _line_has_row_end_marker(self, line: str) -> bool:
+        line_no_nl, _ = self._split_trailing_newline(line)
+        code_part, _ = self._split_latex_comment(line_no_nl)
+        trimmed = code_part.rstrip()
+        if not trimmed.endswith("\\\\"):
+            return False
+        trailing_backslashes = len(trimmed) - len(trimmed.rstrip("\\"))
+        return trailing_backslashes >= 2 and trailing_backslashes % 2 == 0
+
+    def _append_row_end_marker(self, line: str) -> str:
+        line_no_nl, newline_suffix = self._split_trailing_newline(line)
+        code_part, comment_part = self._split_latex_comment(line_no_nl)
+        code_no_ws = code_part.rstrip()
+        trailing_ws = code_part[len(code_no_ws) :]
+        return f"{code_no_ws}\\\\{trailing_ws}{comment_part}{newline_suffix}"
+
+    def _audit_and_repair_line_end_markers(
+        self,
+        source: str,
+        translation: str,
+    ) -> tuple[str, Dict[str, Any]]:
+        source_lines = source.splitlines(keepends=True)
+        translation_lines = translation.splitlines(keepends=True)
+        if len(source_lines) != len(translation_lines):
+            return translation, {
+                "passed": False,
+                "repair_applied": False,
+                "edit_count": 0,
+                "reason": "line_count_mismatch",
+                "missing_lines": [],
+                "spurious_lines": [],
+            }
+
+        repaired_lines: List[str] = []
+        missing_lines: List[int] = []
+        spurious_lines: List[int] = []
+
+        for line_no, (source_line, translation_line) in enumerate(
+            zip(source_lines, translation_lines), start=1
+        ):
+            source_has_marker = self._line_has_row_end_marker(source_line)
+            translation_has_marker = self._line_has_row_end_marker(translation_line)
+
+            if source_has_marker and not translation_has_marker:
+                repaired_lines.append(self._append_row_end_marker(translation_line))
+                missing_lines.append(line_no)
+            else:
+                repaired_lines.append(translation_line)
+
+            if not source_has_marker and translation_has_marker:
+                spurious_lines.append(line_no)
+
+        repaired_translation = "".join(repaired_lines)
+        edit_count = len(missing_lines)
+        passed = not spurious_lines
+        reason = None if passed else "spurious_line_end_marker"
+
+        return repaired_translation, {
+            "passed": passed,
+            "repair_applied": edit_count > 0,
+            "edit_count": edit_count,
+            "reason": reason,
+            "missing_lines": missing_lines,
+            "spurious_lines": spurious_lines,
         }
 
     def _audit_and_repair_brace_structure(
@@ -1084,8 +1171,9 @@ class TranslationPipeline:
             attempts: Dict[str, int] = {chunk_id: 1 for chunk_id in translatable_ids}
             latest_placeholder_audits: Dict[str, Dict[str, Any]] = {}
             latest_brace_audits: Dict[str, Dict[str, Any]] = {}
+            latest_line_end_audits: Dict[str, Dict[str, Any]] = {}
 
-            def _audit_quality_for_chunk(chunk_id: str) -> tuple[bool, bool]:
+            def _audit_quality_for_chunk(chunk_id: str) -> tuple[bool, bool, bool]:
                 source_text = translatable_chunk_map[chunk_id]["content"]
                 translated_chunk = results_map[chunk_id]
 
@@ -1097,23 +1185,44 @@ class TranslationPipeline:
                     translated_chunk.translation = repaired_translation
                 latest_brace_audits[chunk_id] = brace_audit
 
+                repaired_translation, line_end_audit = (
+                    self._audit_and_repair_line_end_markers(
+                        source_text,
+                        translated_chunk.translation,
+                    )
+                )
+                if repaired_translation != translated_chunk.translation:
+                    translated_chunk.translation = repaired_translation
+                latest_line_end_audits[chunk_id] = line_end_audit
+
                 placeholder_audit = self._audit_placeholder_alignment(
                     source_text,
                     translated_chunk.translation,
                 )
                 latest_placeholder_audits[chunk_id] = placeholder_audit
-                return (not placeholder_audit["passed"], not brace_audit["passed"])
+                return (
+                    not placeholder_audit["passed"],
+                    not brace_audit["passed"],
+                    not line_end_audit["passed"],
+                )
 
             failed_placeholder_ids: Set[str] = set()
             failed_brace_ids: Set[str] = set()
+            failed_line_end_ids: Set[str] = set()
             failed_ids: Set[str] = set()
             for chunk_id in translatable_ids:
-                placeholder_failed, brace_failed = _audit_quality_for_chunk(chunk_id)
+                (
+                    placeholder_failed,
+                    brace_failed,
+                    line_end_failed,
+                ) = _audit_quality_for_chunk(chunk_id)
                 if placeholder_failed:
                     failed_placeholder_ids.add(chunk_id)
                 if brace_failed:
                     failed_brace_ids.add(chunk_id)
-                if placeholder_failed or brace_failed:
+                if line_end_failed:
+                    failed_line_end_ids.add(chunk_id)
+                if placeholder_failed or brace_failed or line_end_failed:
                     failed_ids.add(chunk_id)
 
             print(
@@ -1121,6 +1230,9 @@ class TranslationPipeline:
             )
             print(
                 f"round 1 brace audit: failed {len(failed_brace_ids)} / total {len(translatable_ids)}"
+            )
+            print(
+                f"round 1 line_end audit: failed {len(failed_line_end_ids)} / total {len(translatable_ids)}"
             )
 
             for round_index in range(2, self.PLACEHOLDER_RETRY_MAX_ATTEMPTS + 1):
@@ -1139,18 +1251,26 @@ class TranslationPipeline:
 
                 next_failed_placeholder: Set[str] = set()
                 next_failed_brace: Set[str] = set()
+                next_failed_line_end: Set[str] = set()
                 next_failed: Set[str] = set()
                 for chunk_id in failed_ids:
-                    placeholder_failed, brace_failed = _audit_quality_for_chunk(chunk_id)
+                    (
+                        placeholder_failed,
+                        brace_failed,
+                        line_end_failed,
+                    ) = _audit_quality_for_chunk(chunk_id)
                     if placeholder_failed:
                         next_failed_placeholder.add(chunk_id)
                     if brace_failed:
                         next_failed_brace.add(chunk_id)
-                    if placeholder_failed or brace_failed:
+                    if line_end_failed:
+                        next_failed_line_end.add(chunk_id)
+                    if placeholder_failed or brace_failed or line_end_failed:
                         next_failed.add(chunk_id)
 
                 failed_placeholder_ids = next_failed_placeholder
                 failed_brace_ids = next_failed_brace
+                failed_line_end_ids = next_failed_line_end
                 failed_ids = next_failed
                 print(
                     f"round {round_index} placeholder audit: failed {len(failed_placeholder_ids)} / total {len(translatable_ids)}"
@@ -1158,20 +1278,39 @@ class TranslationPipeline:
                 print(
                     f"round {round_index} brace audit: failed {len(failed_brace_ids)} / total {len(translatable_ids)}"
                 )
+                print(
+                    f"round {round_index} line_end audit: failed {len(failed_line_end_ids)} / total {len(translatable_ids)}"
+                )
 
             exhausted_placeholder_ids = set(failed_placeholder_ids)
             exhausted_brace_ids = set(failed_brace_ids)
+            exhausted_line_end_ids = set(failed_line_end_ids)
             brace_fallback_ids: Set[str] = set()
-            for chunk_id in exhausted_brace_ids:
+            line_end_fallback_ids: Set[str] = set()
+            for chunk_id in exhausted_brace_ids | exhausted_line_end_ids:
                 source_text = translatable_chunk_map[chunk_id]["content"]
-                if results_map[chunk_id].translation != source_text:
+                translation_before_fallback = results_map[chunk_id].translation
+                if (
+                    chunk_id in exhausted_brace_ids
+                    and translation_before_fallback != source_text
+                ):
                     brace_fallback_ids.add(chunk_id)
+                if (
+                    chunk_id in exhausted_line_end_ids
+                    and translation_before_fallback != source_text
+                ):
+                    line_end_fallback_ids.add(chunk_id)
                 results_map[chunk_id].translation = source_text
                 _, brace_audit = self._audit_and_repair_brace_structure(
                     source_text,
                     results_map[chunk_id].translation,
                 )
                 latest_brace_audits[chunk_id] = brace_audit
+                _, line_end_audit = self._audit_and_repair_line_end_markers(
+                    source_text,
+                    results_map[chunk_id].translation,
+                )
+                latest_line_end_audits[chunk_id] = line_end_audit
                 latest_placeholder_audits[chunk_id] = self._audit_placeholder_alignment(
                     source_text,
                     results_map[chunk_id].translation,
@@ -1190,8 +1329,15 @@ class TranslationPipeline:
                     "edit_count": 0,
                     "reason": None,
                 }
+                line_end_audit = latest_line_end_audits.get(chunk_id) or {
+                    "passed": True,
+                    "repair_applied": False,
+                    "edit_count": 0,
+                    "reason": None,
+                }
                 is_placeholder_exhausted = chunk_id in exhausted_placeholder_ids
                 is_brace_exhausted = chunk_id in exhausted_brace_ids
+                is_line_end_exhausted = chunk_id in exhausted_line_end_ids
                 results_map[chunk_id].metadata.update(
                     {
                         "placeholder_attempt": attempts.get(chunk_id, 1),
@@ -1206,6 +1352,16 @@ class TranslationPipeline:
                         "brace_retry_exhausted": is_brace_exhausted,
                         "brace_fallback_applied": chunk_id in brace_fallback_ids,
                         "brace_mismatch_reason": brace_audit.get("reason"),
+                        "line_end_audit_passed": bool(line_end_audit["passed"]),
+                        "line_end_fix_applied": bool(
+                            line_end_audit.get("repair_applied")
+                        ),
+                        "line_end_fix_edit_count": int(
+                            line_end_audit.get("edit_count", 0)
+                        ),
+                        "line_end_retry_exhausted": is_line_end_exhausted,
+                        "line_end_fallback_applied": chunk_id in line_end_fallback_ids,
+                        "line_end_mismatch_reason": line_end_audit.get("reason"),
                     }
                 )
 
@@ -1223,6 +1379,14 @@ class TranslationPipeline:
                 )
                 print(
                     f"[WARNING] brace retry exhausted: {len(exhausted_brace_ids)} chunks ({exhausted_prefixes}); fallback to source applied"
+                )
+
+            if exhausted_line_end_ids:
+                exhausted_prefixes = ", ".join(
+                    sorted(chunk_id[:8] for chunk_id in exhausted_line_end_ids)
+                )
+                print(
+                    f"[WARNING] line_end retry exhausted: {len(exhausted_line_end_ids)} chunks ({exhausted_prefixes}); fallback to source applied"
                 )
 
             return exhausted_placeholder_ids

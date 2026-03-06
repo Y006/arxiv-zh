@@ -710,6 +710,10 @@ class LaTeXCompiler:
             r"Undefined control sequence\.",
             re.IGNORECASE,
         )
+        misplaced_noalign_error = re.compile(
+            r"Misplaced\s+\\noalign\.",
+            re.IGNORECASE,
+        )
         for i, line in enumerate(lines):
             # LaTeX errors usually start with !
             if line.strip().startswith("!"):
@@ -718,6 +722,8 @@ class LaTeXCompiler:
             if package_or_latex_error.search(line):
                 return "\n".join(lines[i : min(i + 5, len(lines))])
             if undefined_control_error.search(line):
+                return "\n".join(lines[i : min(i + 5, len(lines))])
+            if misplaced_noalign_error.search(line):
                 return "\n".join(lines[i : min(i + 5, len(lines))])
 
         # Fallback: check for common error patterns if no ! found
@@ -734,6 +740,8 @@ class LaTeXCompiler:
         if "package" in lowered:
             return "package"
         if "undefined control sequence" in lowered:
+            return "latex"
+        if "misplaced \\noalign" in lowered:
             return "latex"
         if "latex error" in lowered or lowered.startswith("!"):
             return "latex"

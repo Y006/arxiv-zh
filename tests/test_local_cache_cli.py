@@ -135,6 +135,68 @@ def test_cli_skips_cache_write_when_brace_fallback_applied(tmp_path):
         cache.close()
 
 
+def test_cli_skips_cache_write_when_line_end_audit_fails(tmp_path):
+    cache = LocalTranslationCache(cache_dir=tmp_path / "cache")
+    try:
+        bad_key = "66" * 16
+        chunk = TranslatedChunk(
+            source="s",
+            translation="line end fail",
+            chunk_id="c1",
+            metadata={
+                "local_cache_key_hash": bad_key,
+                "placeholder_audit_passed": True,
+                "brace_audit_passed": True,
+                "brace_fallback_applied": False,
+                "line_end_audit_passed": False,
+                "line_end_fallback_applied": False,
+            },
+        )
+
+        written, skipped = _write_local_cache_after_quality_gate(
+            local_cache=cache,
+            translated_chunks=[chunk],
+            missing_fallback_ids=set(),
+        )
+        assert written == 0
+        assert skipped == 1
+        assert chunk.metadata["local_cache_skip_reason"] == "line_end_audit_failed"
+        assert cache.get_by_hash(bad_key) is None
+    finally:
+        cache.close()
+
+
+def test_cli_skips_cache_write_when_line_end_fallback_applied(tmp_path):
+    cache = LocalTranslationCache(cache_dir=tmp_path / "cache")
+    try:
+        bad_key = "77" * 16
+        chunk = TranslatedChunk(
+            source="s",
+            translation="line end fallback",
+            chunk_id="c1",
+            metadata={
+                "local_cache_key_hash": bad_key,
+                "placeholder_audit_passed": True,
+                "brace_audit_passed": True,
+                "brace_fallback_applied": False,
+                "line_end_audit_passed": True,
+                "line_end_fallback_applied": True,
+            },
+        )
+
+        written, skipped = _write_local_cache_after_quality_gate(
+            local_cache=cache,
+            translated_chunks=[chunk],
+            missing_fallback_ids=set(),
+        )
+        assert written == 0
+        assert skipped == 1
+        assert chunk.metadata["local_cache_skip_reason"] == "line_end_fallback"
+        assert cache.get_by_hash(bad_key) is None
+    finally:
+        cache.close()
+
+
 def test_cache_stats_command_outputs_size_and_hit_rate(tmp_path, monkeypatch):
     config = _make_config(tmp_path)
     cache = LocalTranslationCache(cache_dir=tmp_path / "cache")

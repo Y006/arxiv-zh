@@ -279,6 +279,18 @@ def test_extract_error_detects_undefined_control_sequence():
     assert "\\pdfoutput" in extracted
 
 
+def test_extract_error_detects_misplaced_noalign():
+    compiler = LaTeXCompiler()
+    log = (
+        "./main.tex:1304: Misplaced \\noalign.\n"
+        "\\midrule ->\\noalign\n"
+        "                    {\\ifnum 0=`}\\fi\n"
+    )
+    extracted = compiler._extract_error(log)
+    assert "Misplaced \\noalign." in extracted
+    assert "\\midrule" in extracted
+
+
 def test_compile_retries_after_pdftex_primitive_conflict(monkeypatch, tmp_path: Path):
     compiler = LaTeXCompiler()
     compiler.engines = ["xelatex"]

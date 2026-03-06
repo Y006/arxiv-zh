@@ -223,6 +223,16 @@ def _write_local_cache_after_quality_gate(
             cache_skipped += 1
             continue
 
+        if not bool(metadata.get("line_end_audit_passed", True)):
+            metadata["local_cache_skip_reason"] = "line_end_audit_failed"
+            cache_skipped += 1
+            continue
+
+        if bool(metadata.get("line_end_fallback_applied")):
+            metadata["local_cache_skip_reason"] = "line_end_fallback"
+            cache_skipped += 1
+            continue
+
         if not chunk.translation.strip():
             metadata["local_cache_skip_reason"] = "empty_translation"
             cache_skipped += 1

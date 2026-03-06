@@ -220,6 +220,20 @@ def test_extract_error_detects_package_error_without_bang():
     assert "Switching it off." in extracted
 
 
+def test_extract_error_detects_missing_endcsname_inserted():
+    compiler = LaTeXCompiler()
+    log = (
+        "Some line\n"
+        "! Missing \\endcsname inserted.\n"
+        "<to be read again>\n"
+        "                   \\protect \n"
+        "l.104 ...{（我们将在\\autoref{related\\_works}中详细讨论相关工作）}\n"
+    )
+    extracted = compiler._extract_error(log)
+    assert "Missing \\endcsname inserted." in extracted
+    assert "\\autoref{related\\_works}" in extracted
+
+
 def test_compile_reports_latest_round_error_after_fallback(monkeypatch, tmp_path: Path):
     compiler = LaTeXCompiler()
     compiler.engines = ["xelatex"]
@@ -289,6 +303,18 @@ def test_extract_error_detects_misplaced_noalign():
     extracted = compiler._extract_error(log)
     assert "Misplaced \\noalign." in extracted
     assert "\\midrule" in extracted
+
+
+def test_extract_error_detects_critical_package_error():
+    compiler = LaTeXCompiler()
+    log = (
+        "/usr/local/texlive/2023/texmf-dist/tex/xelatex/xecjk/xeCJK.sty:43: "
+        "Critical Package xeCJK Error: The xeCJK package requires XeTeX to function.\n"
+        "(xeCJK) You must change your typesetting engine to \"xelatex\".\n"
+    )
+    extracted = compiler._extract_error(log)
+    assert "Critical Package xeCJK Error" in extracted
+    assert "requires XeTeX" in extracted
 
 
 def test_compile_retries_after_pdftex_primitive_conflict(monkeypatch, tmp_path: Path):

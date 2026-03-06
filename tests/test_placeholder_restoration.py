@@ -15,7 +15,10 @@ class TestPlaceholderRestoration:
         # Test cases using _replace_with_placeholder (stored in global_placeholders)
         global_placeholder_cases = [
             (r"See \cite{smith2020}", "CITE", r"\cite{smith2020}"),
+            (r"See \citet{smith2020}", "CITE", r"\citet{smith2020}"),
+            (r"See \citep{smith2020}", "CITE", r"\citep{smith2020}"),
             (r"In equation \ref{eq:1}", "REF", r"\ref{eq:1}"),
+            (r"See \autoref{sec:intro}", "REF", r"\autoref{sec:intro}"),
             (r"The formula $E=mc^2$ shows", "MATH", r"$E=mc^2$"),
             (r"Display \[x^2 + y^2 = z^2\] here", "MATH", r"\[x^2 + y^2 = z^2\]"),
             (

@@ -80,6 +80,37 @@ async def test_placeholder_retry_exhausted_keeps_third_translation():
 
 
 @pytest.mark.asyncio
+async def test_placeholder_retry_detects_duplicate_placeholder_counts():
+    pipeline = _build_pipeline(batch_short_threshold=0)
+    call_count = {"c1": 0}
+
+    async def fake_translate_chunk(chunk: str, chunk_id: str, context=None):
+        call_count[chunk_id] += 1
+        translation = (
+            "第一次重复 [[MATH_1]] [[MATH_1]]"
+            if call_count[chunk_id] == 1
+            else "第二次修复 [[MATH_1]]"
+        )
+        return TranslatedChunk(
+            source=chunk,
+            translation=translation,
+            chunk_id=chunk_id,
+            metadata={},
+        )
+
+    chunks = [{"chunk_id": "c1", "content": "source [[MATH_1]] chunk"}]
+
+    with patch.object(pipeline, "translate_chunk", side_effect=fake_translate_chunk):
+        results = await pipeline.translate_document(chunks, max_concurrent=2)
+
+    chunk = results[0]
+    assert call_count["c1"] == 2
+    assert chunk.translation == "第二次修复 [[MATH_1]]"
+    assert chunk.metadata["placeholder_audit_passed"] is True
+    assert chunk.metadata["placeholder_retry_exhausted"] is False
+
+
+@pytest.mark.asyncio
 async def test_partial_batch_retry_only_failed_chunks():
     pipeline = _build_pipeline(batch_short_threshold=10_000, batch_max_chars=10_000)
     batch_calls: list[list[str]] = []
@@ -160,17 +191,18 @@ async def test_brace_escape_drift_fixed_without_retry():
 
 
 @pytest.mark.asyncio
-async def test_brace_retry_exhausted_falls_back_to_source():
+async def test_brace_retry_exhausted_keeps_last_translation_with_warning():
     pipeline = _build_pipeline(batch_short_threshold=0)
     call_count = {"c1": 0}
 
     source = r'Schema: \{"a": \{"b": 1\}\}'
+    last_translation = '模式："a": {"b": 1'
 
     async def fake_translate_chunk(chunk: str, chunk_id: str, context=None):
         call_count[chunk_id] += 1
         return TranslatedChunk(
             source=chunk,
-            translation='模式："a": {"b": 1',
+            translation=last_translation,
             chunk_id=chunk_id,
             metadata={},
         )
@@ -181,10 +213,83 @@ async def test_brace_retry_exhausted_falls_back_to_source():
 
     chunk = results[0]
     assert call_count["c1"] == 3
-    assert chunk.translation == source
+    assert chunk.translation == last_translation
     assert chunk.metadata["brace_retry_exhausted"] is True
-    assert chunk.metadata["brace_fallback_applied"] is True
+    assert chunk.metadata["brace_fallback_applied"] is False
+    assert chunk.metadata["brace_audit_passed"] is False
+    assert chunk.metadata["kept_last_translation_on_fallback"] is True
+    assert "brace_retry_exhausted" in chunk.metadata["quality_warning_types"]
+
+
+@pytest.mark.asyncio
+async def test_brace_wrapper_suffix_is_repaired_without_retry():
+    pipeline = _build_pipeline(batch_short_threshold=0)
+    call_count = {"c1": 0}
+
+    source = (
+        "\\textcolor{black}{\\paragraph{{{CHUNK_head}}}\n"
+        "Model-driven methods embed watermarks into the LLM.}"
+    )
+    missing_suffix_translation = (
+        "\\textcolor{black}{\\paragraph{{{CHUNK_head}}}\n"
+        "模型驱动方法将水印嵌入大语言模型。"
+    )
+
+    async def fake_translate_chunk(chunk: str, chunk_id: str, context=None):
+        call_count[chunk_id] += 1
+        return TranslatedChunk(
+            source=chunk,
+            translation=missing_suffix_translation,
+            chunk_id=chunk_id,
+            metadata={},
+        )
+
+    chunks = [{"chunk_id": "c1", "content": source}]
+    with patch.object(pipeline, "translate_chunk", side_effect=fake_translate_chunk):
+        results = await pipeline.translate_document(chunks, max_concurrent=2)
+
+    chunk = results[0]
+    assert call_count["c1"] == 1
+    assert chunk.translation.endswith("。}")
     assert chunk.metadata["brace_audit_passed"] is True
+    assert chunk.metadata["brace_fix_applied"] is True
+    assert chunk.metadata["brace_retry_exhausted"] is False
+
+
+@pytest.mark.asyncio
+async def test_added_safe_inline_formatting_command_is_unwrapped_without_retry():
+    pipeline = _build_pipeline(batch_short_threshold=0)
+    call_count = {"c1": 0}
+
+    source = (
+        "\\textcolor{black}{LLMDet computes perplexity scores for selected "
+        "\\textit{n}-grams.}"
+    )
+    translation_with_extra_formatting = (
+        "\\textcolor{black}{LLMDet会为选定\\textit{n}元语法计算困惑度得分，并统计这些"
+        "\\textit{n}元语法的结果。}"
+    )
+
+    async def fake_translate_chunk(chunk: str, chunk_id: str, context=None):
+        call_count[chunk_id] += 1
+        return TranslatedChunk(
+            source=chunk,
+            translation=translation_with_extra_formatting,
+            chunk_id=chunk_id,
+            metadata={},
+        )
+
+    chunks = [{"chunk_id": "c1", "content": source}]
+    with patch.object(pipeline, "translate_chunk", side_effect=fake_translate_chunk):
+        results = await pipeline.translate_document(chunks, max_concurrent=2)
+
+    chunk = results[0]
+    assert call_count["c1"] == 1
+    assert chunk.translation.count("\\textit{") == 1
+    assert "这些n元语法" in chunk.translation
+    assert chunk.metadata["brace_audit_passed"] is True
+    assert chunk.metadata["brace_fix_applied"] is True
+    assert chunk.metadata["brace_retry_exhausted"] is False
 
 
 @pytest.mark.asyncio
@@ -222,16 +327,76 @@ async def test_line_end_missing_marker_fixed_without_retry():
 
 
 @pytest.mark.asyncio
-async def test_line_end_retry_exhausted_falls_back_to_source():
+async def test_line_end_retry_exhausted_keeps_last_translation_with_warning():
     pipeline = _build_pipeline(batch_short_threshold=0)
     call_count = {"c1": 0}
     source = r"\texttt{task-a} [[AMP_1]] desc \\" + "\n" + r"\texttt{task-b} [[AMP_2]] desc \\"
+    last_translation = r"\texttt{task-a} [[AMP_1]] 描述 \texttt{task-b} [[AMP_2]] 描述"
 
     async def fake_translate_chunk(chunk: str, chunk_id: str, context=None):
         call_count[chunk_id] += 1
         return TranslatedChunk(
             source=chunk,
-            translation=r"\texttt{task-a} [[AMP_1]] 描述 \texttt{task-b} [[AMP_2]] 描述",
+            translation=last_translation,
+            chunk_id=chunk_id,
+            metadata={},
+        )
+
+    chunks = [{"chunk_id": "c1", "content": source}]
+    with patch.object(pipeline, "translate_chunk", side_effect=fake_translate_chunk):
+        results = await pipeline.translate_document(chunks, max_concurrent=2)
+
+    chunk = results[0]
+    assert call_count["c1"] == 3
+    assert chunk.translation == last_translation
+    assert chunk.metadata["line_end_retry_exhausted"] is True
+    assert chunk.metadata["line_end_fallback_applied"] is False
+    assert chunk.metadata["line_end_audit_passed"] is False
+    assert chunk.metadata["kept_last_translation_on_fallback"] is True
+    assert "line_end_retry_exhausted" in chunk.metadata["quality_warning_types"]
+
+
+@pytest.mark.asyncio
+async def test_untranslated_retry_succeeds_on_second_attempt():
+    pipeline = _build_pipeline(batch_short_threshold=0)
+    call_count = {"c1": 0}
+
+    source = "Model-driven methods embed watermarks into the LLM."
+
+    async def fake_translate_chunk(chunk: str, chunk_id: str, context=None):
+        call_count[chunk_id] += 1
+        translation = source if call_count[chunk_id] == 1 else "模型驱动方法将水印嵌入大语言模型。"
+        return TranslatedChunk(
+            source=chunk,
+            translation=translation,
+            chunk_id=chunk_id,
+            metadata={},
+        )
+
+    chunks = [{"chunk_id": "c1", "content": source}]
+    with patch.object(pipeline, "translate_chunk", side_effect=fake_translate_chunk):
+        results = await pipeline.translate_document(chunks, max_concurrent=2)
+
+    chunk = results[0]
+    assert call_count["c1"] == 2
+    assert chunk.translation == "模型驱动方法将水印嵌入大语言模型。"
+    assert chunk.metadata["untranslated_audit_passed"] is True
+    assert chunk.metadata["untranslated_retry_exhausted"] is False
+    assert chunk.metadata["placeholder_attempt"] == 2
+
+
+@pytest.mark.asyncio
+async def test_untranslated_retry_exhausted_keeps_last_translation():
+    pipeline = _build_pipeline(batch_short_threshold=0)
+    call_count = {"c1": 0}
+
+    source = "This detector should translate the English body text."
+
+    async def fake_translate_chunk(chunk: str, chunk_id: str, context=None):
+        call_count[chunk_id] += 1
+        return TranslatedChunk(
+            source=chunk,
+            translation=source,
             chunk_id=chunk_id,
             metadata={},
         )
@@ -243,9 +408,78 @@ async def test_line_end_retry_exhausted_falls_back_to_source():
     chunk = results[0]
     assert call_count["c1"] == 3
     assert chunk.translation == source
-    assert chunk.metadata["line_end_retry_exhausted"] is True
-    assert chunk.metadata["line_end_fallback_applied"] is True
-    assert chunk.metadata["line_end_audit_passed"] is True
+    assert chunk.metadata["untranslated_audit_passed"] is False
+    assert chunk.metadata["untranslated_retry_exhausted"] is True
+    assert chunk.metadata["kept_last_translation_on_fallback"] is True
+    assert "untranslated_retry_exhausted" in chunk.metadata["quality_warning_types"]
+
+
+@pytest.mark.asyncio
+async def test_untranslated_audit_skips_configuration_like_blocks():
+    pipeline = _build_pipeline(batch_short_threshold=0)
+    call_count = {"c1": 0}
+
+    source = (
+        "for tree={\n"
+        "  grow=east,\n"
+        "  reversed=true,\n"
+        "  anchor=base west,\n"
+        "  parent anchor=east,\n"
+        "  child anchor=west,\n"
+        "  },\n"
+        "  where level=1{font=\\scriptsize,fill=pink!5}{},\n"
+    )
+
+    async def fake_translate_chunk(chunk: str, chunk_id: str, context=None):
+        call_count[chunk_id] += 1
+        return TranslatedChunk(
+            source=chunk,
+            translation=source,
+            chunk_id=chunk_id,
+            metadata={},
+        )
+
+    chunks = [{"chunk_id": "c1", "content": source}]
+    with patch.object(pipeline, "translate_chunk", side_effect=fake_translate_chunk):
+        results = await pipeline.translate_document(chunks, max_concurrent=2)
+
+    chunk = results[0]
+    assert call_count["c1"] == 1
+    assert chunk.translation == source
+    assert chunk.metadata["untranslated_audit_passed"] is True
+    assert chunk.metadata["untranslated_retry_exhausted"] is False
+
+
+@pytest.mark.asyncio
+async def test_untranslated_audit_skips_command_dominated_blocks():
+    pipeline = _build_pipeline(batch_short_threshold=0)
+    call_count = {"c1": 0}
+
+    source = (
+        "\\pgfplotsset{compat=1.16}\n"
+        "\\definecolor{colorA}{RGB}{230, 230, 250}\n"
+        "\\definecolor{colorB}{RGB}{255, 218, 185}\n"
+        "[[ENV_21]]\n"
+    )
+
+    async def fake_translate_chunk(chunk: str, chunk_id: str, context=None):
+        call_count[chunk_id] += 1
+        return TranslatedChunk(
+            source=chunk,
+            translation=source,
+            chunk_id=chunk_id,
+            metadata={},
+        )
+
+    chunks = [{"chunk_id": "c1", "content": source}]
+    with patch.object(pipeline, "translate_chunk", side_effect=fake_translate_chunk):
+        results = await pipeline.translate_document(chunks, max_concurrent=2)
+
+    chunk = results[0]
+    assert call_count["c1"] == 1
+    assert chunk.translation == source
+    assert chunk.metadata["untranslated_audit_passed"] is True
+    assert chunk.metadata["untranslated_retry_exhausted"] is False
 
 
 @pytest.mark.asyncio

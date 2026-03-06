@@ -213,7 +213,7 @@ def escape_latex_special_chars(text: str) -> str:
     r"""
     Escape LaTeX special characters in translated text.
 
-    Escapes: % -> \%, & -> \&, # -> \#
+    Escapes: % -> \%, & -> \&, # -> \#, _ -> \_
     Does NOT double-escape already escaped characters.
     Preserves placeholders like [[MATH_1]] and {{CHUNK_uuid}}.
 
@@ -224,7 +224,7 @@ def escape_latex_special_chars(text: str) -> str:
         Text with special characters properly escaped
     """
     # Regex to match placeholders: [[...]] or {{CHUNK_...}}
-    placeholder_pattern = r"(\[\[[^\]]+\]\]|\{\{CHUNK_[a-f0-9-]+\}\})"
+    placeholder_pattern = r"(\[\[[^\]]+\]\]|\{\{CHUNK_[A-Za-z0-9-]+\}\})"
 
     # Split text into alternating segments: text/placeholder/text/placeholder...
     segments = re.split(placeholder_pattern, text)
@@ -236,6 +236,7 @@ def escape_latex_special_chars(text: str) -> str:
             segment = re.sub(r"(?<!\\)%", r"\\%", segment)
             segment = re.sub(r"(?<!\\)&", r"\\&", segment)
             segment = re.sub(r"(?<!\\)#", r"\\#", segment)
+            segment = re.sub(r"(?<!\\)_", r"\\_", segment)
         escaped_segments.append(segment)
 
     return "".join(escaped_segments)

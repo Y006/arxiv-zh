@@ -63,6 +63,7 @@ class LaTeXCompiler:
             last_log = None
             applied_fallback_reasons = set()
             engine_failures: List[Tuple[str, Optional[str], str]] = []
+            last_round_failures: List[Tuple[str, Optional[str], str]] = []
             failure_rank: Dict[str, int] = {
                 "fontspec": 0,
                 "package": 1,
@@ -70,9 +71,12 @@ class LaTeXCompiler:
                 "unknown": 3,
             }
 
-            for _round in range(3):
+            for _round in range(6):
                 source_file.write_text(compile_source, encoding="utf-8")
                 missing_font: Optional[str] = None
+                missing_file: Optional[str] = None
+                has_microtype_tracking_error = False
+                round_failures: List[Tuple[str, Optional[str], str]] = []
 
                 for engine in self.engines:
                     # Skip engines that are not installed
@@ -109,10 +113,19 @@ class LaTeXCompiler:
                     last_error = error
                     if error:
                         error_tag = self._classify_error_text(error)
-                        engine_failures.append((engine, error, error_tag))
+                        failure_record = (engine, error, error_tag)
+                        engine_failures.append(failure_record)
+                        round_failures.append(failure_record)
                     if missing_font is None:
                         missing_font = self._extract_missing_font_name(log)
+                    if missing_file is None:
+                        missing_file = self._extract_missing_latex_file(log)
+                    if not has_microtype_tracking_error:
+                        has_microtype_tracking_error = self._has_microtype_tracking_error(
+                            log
+                        )
 
+                fallback_applied = False
                 if missing_font:
                     (
                         patched_source,
@@ -127,13 +140,61 @@ class LaTeXCompiler:
                     ):
                         compile_source = patched_source
                         applied_fallback_reasons.add(fallback_reason)
-                        continue
+                        fallback_applied = True
+
+                if not fallback_applied and missing_file:
+                    (
+                        patched_source,
+                        fallback_reason,
+                        fallback_changed,
+                    ) = self._apply_missing_file_fallback(
+                        compile_source,
+                        missing_file,
+                        workspace_dir=temp_path,
+                    )
+                    if (
+                        fallback_changed
+                        and fallback_reason not in applied_fallback_reasons
+                    ):
+                        compile_source = patched_source
+                        applied_fallback_reasons.add(fallback_reason)
+                        fallback_applied = True
+
+                if not fallback_applied and has_microtype_tracking_error:
+                    (
+                        patched_source,
+                        fallback_reason,
+                        fallback_changed,
+                    ) = self._apply_microtype_tracking_fallback(
+                        compile_source,
+                        workspace_dir=temp_path,
+                    )
+                    if (
+                        fallback_changed
+                        and fallback_reason not in applied_fallback_reasons
+                    ):
+                        compile_source = patched_source
+                        applied_fallback_reasons.add(fallback_reason)
+                        fallback_applied = True
+
+                if round_failures:
+                    last_round_failures = round_failures
+                if fallback_applied:
+                    continue
                 break
 
             # If we reach here, all engines failed
-            if engine_failures:
+            failures_for_report = last_round_failures or engine_failures
+            if (
+                failures_for_report
+                and all(tag == "unknown" for _, _, tag in failures_for_report)
+                and any(tag != "unknown" for _, _, tag in engine_failures)
+            ):
+                failures_for_report = engine_failures
+
+            if failures_for_report:
                 best_engine, best_error, _ = sorted(
-                    engine_failures,
+                    failures_for_report,
                     key=lambda item: failure_rank.get(item[2], 99),
                 )[0]
                 last_error = f"[{best_engine}] {best_error}"
@@ -312,6 +373,166 @@ class LaTeXCompiler:
 
         return latex_source, "no_fallback"
 
+    def _extract_missing_latex_file(self, log: str) -> Optional[str]:
+        if not log:
+            return None
+        match = re.search(
+            r"File [`']([^`']+)[`'] not found",
+            log,
+            re.IGNORECASE,
+        )
+        if match:
+            return match.group(1).strip()
+        return None
+
+    @staticmethod
+    def _rewrite_bxcoloremoji_names_false(text: str) -> Tuple[str, bool]:
+        pattern = (
+            r"\\(?P<cmd>RequirePackage|usepackage)"
+            r"(?:\[(?P<opts>[^\]]*)\])?\{bxcoloremoji\}"
+        )
+
+        def _replace(match: re.Match[str]) -> str:
+            cmd = match.group("cmd")
+            opts = match.group("opts")
+            if opts is None:
+                return f"\\{cmd}[names=false]" + "{bxcoloremoji}"
+
+            parts = [part.strip() for part in opts.split(",") if part.strip()]
+            new_parts: List[str] = []
+            has_names = False
+            for part in parts:
+                if re.fullmatch(r"names(?:\s*=\s*true)?", part, flags=re.IGNORECASE):
+                    new_parts.append("names=false")
+                    has_names = True
+                elif re.fullmatch(
+                    r"names\s*=\s*false", part, flags=re.IGNORECASE
+                ):
+                    new_parts.append("names=false")
+                    has_names = True
+                else:
+                    new_parts.append(part)
+            if not has_names:
+                new_parts.append("names=false")
+            return f"\\{cmd}[{','.join(new_parts)}]" + "{bxcoloremoji}"
+
+        patched = re.sub(pattern, _replace, text)
+        return patched, patched != text
+
+    def _apply_missing_file_fallback(
+        self,
+        latex_source: str,
+        missing_file: str,
+        workspace_dir: Optional[Path] = None,
+    ) -> Tuple[str, str, bool]:
+        file_key = missing_file.strip().lower()
+        if file_key != "bxcoloremoji-names.def":
+            return latex_source, "no_fallback", False
+
+        patched_source, source_changed = self._rewrite_bxcoloremoji_names_false(
+            latex_source
+        )
+        workspace_changed = False
+        if workspace_dir and workspace_dir.exists():
+            workspace_changed = self._patch_workspace_text_files(
+                workspace_dir,
+                self._rewrite_bxcoloremoji_names_false,
+                skip_main_tex=True,
+            )
+
+        changed = source_changed or workspace_changed
+        if changed:
+            return patched_source, "fallback_bxcoloremoji_names_false", True
+        return latex_source, "no_fallback", False
+
+    @staticmethod
+    def _has_microtype_tracking_error(log: str) -> bool:
+        lowered = (log or "").lower().replace("\r", "\n")
+        return bool(
+            re.search(r"package\s+microtype\s+error", lowered)
+            and re.search(
+                r"tracking\s+feature\s+only\s+works\s+with\s+p(?:\s|\(microtype\))*dftex",
+                lowered,
+            )
+        )
+
+    @staticmethod
+    def _rewrite_microtype_tracking(text: str) -> Tuple[str, bool]:
+        pattern = re.compile(
+            r"\\(?P<cmd>RequirePackage|usepackage)\[(?P<opts>[^\]]*)\]\{microtype\}"
+        )
+        changed = False
+
+        def _replace(match: re.Match[str]) -> str:
+            nonlocal changed
+            cmd = match.group("cmd")
+            opts = match.group("opts")
+            parts = [part.strip() for part in opts.split(",") if part.strip()]
+            kept_parts: List[str] = []
+            removed = False
+            for part in parts:
+                if re.fullmatch(
+                    r"tracking(?:\s*=\s*smallcaps)?", part, flags=re.IGNORECASE
+                ):
+                    removed = True
+                    continue
+                kept_parts.append(part)
+
+            if not removed:
+                return match.group(0)
+
+            changed = True
+            if kept_parts:
+                return f"\\{cmd}[{','.join(kept_parts)}]" + "{microtype}"
+            return f"\\{cmd}" + "{microtype}"
+
+        patched = pattern.sub(_replace, text)
+        return patched, changed
+
+    def _patch_workspace_text_files(
+        self,
+        workspace_dir: Path,
+        rewriter,
+        *,
+        skip_main_tex: bool,
+    ) -> bool:
+        changed_any = False
+        for path in workspace_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in {".tex", ".cls", ".sty"}:
+                continue
+            if skip_main_tex and path.name == "main.tex":
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            patched, changed = rewriter(text)
+            if not changed:
+                continue
+            path.write_text(patched, encoding="utf-8")
+            changed_any = True
+        return changed_any
+
+    def _apply_microtype_tracking_fallback(
+        self,
+        latex_source: str,
+        workspace_dir: Optional[Path] = None,
+    ) -> Tuple[str, str, bool]:
+        patched_source, source_changed = self._rewrite_microtype_tracking(latex_source)
+        workspace_changed = False
+        if workspace_dir and workspace_dir.exists():
+            workspace_changed = self._patch_workspace_text_files(
+                workspace_dir,
+                self._rewrite_microtype_tracking,
+                skip_main_tex=True,
+            )
+        changed = source_changed or workspace_changed
+        if changed:
+            return patched_source, "fallback_disable_microtype_tracking", True
+        return latex_source, "no_fallback", False
+
     def _run_bibliography_tool(self, tool: str, cwd: Path) -> bool:
         cmd = [tool, "main"]
         try:
@@ -406,10 +627,16 @@ class LaTeXCompiler:
             return "No log content"
 
         lines = log.splitlines()
+        package_or_latex_error = re.compile(
+            r"(Package\s+[^\s:]+\s+Error:|LaTeX\s+Error:)",
+            re.IGNORECASE,
+        )
         for i, line in enumerate(lines):
             # LaTeX errors usually start with !
             if line.strip().startswith("!"):
                 # capture context (up to 5 lines)
+                return "\n".join(lines[i : min(i + 5, len(lines))])
+            if package_or_latex_error.search(line):
                 return "\n".join(lines[i : min(i + 5, len(lines))])
 
         # Fallback: check for common error patterns if no ! found

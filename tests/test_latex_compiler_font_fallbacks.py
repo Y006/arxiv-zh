@@ -137,3 +137,131 @@ def test_run_single_pass_sets_osfontdir_when_fonts_dir_exists(monkeypatch, tmp_p
     assert "OSFONTDIR" in captured["env"]
     assert str(fonts_dir) in captured["env"]["OSFONTDIR"]
     assert "/existing/fonts" in captured["env"]["OSFONTDIR"]
+
+
+def test_apply_missing_file_fallback_sets_bxcoloremoji_names_false(tmp_path: Path):
+    compiler = LaTeXCompiler()
+    source = r"""
+\documentclass{article}
+\usepackage{bxcoloremoji}
+\begin{document}
+text
+\end{document}
+"""
+    workspace_file = tmp_path / "mystyle.cls"
+    workspace_file.write_text(r"\RequirePackage{bxcoloremoji}", encoding="utf-8")
+
+    patched, reason, changed = compiler._apply_missing_file_fallback(
+        source,
+        "bxcoloremoji-names.def",
+        workspace_dir=tmp_path,
+    )
+
+    assert changed is True
+    assert reason == "fallback_bxcoloremoji_names_false"
+    assert r"\usepackage[names=false]{bxcoloremoji}" in patched
+    assert (
+        r"\RequirePackage[names=false]{bxcoloremoji}"
+        in workspace_file.read_text(encoding="utf-8")
+    )
+
+
+def test_apply_microtype_tracking_fallback_patches_source_and_workspace(tmp_path: Path):
+    compiler = LaTeXCompiler()
+    source = r"""
+\documentclass{article}
+\usepackage[tracking=smallcaps]{microtype}
+\begin{document}
+text
+\end{document}
+"""
+    workspace_file = tmp_path / "mystyle.cls"
+    workspace_file.write_text(
+        r"\AtEndOfClass{\RequirePackage[tracking=smallcaps]{microtype}}",
+        encoding="utf-8",
+    )
+
+    patched, reason, changed = compiler._apply_microtype_tracking_fallback(
+        source,
+        workspace_dir=tmp_path,
+    )
+
+    assert changed is True
+    assert reason == "fallback_disable_microtype_tracking"
+    assert r"\usepackage{microtype}" in patched
+    assert "tracking=smallcaps" not in patched
+
+    workspace_text = workspace_file.read_text(encoding="utf-8")
+    assert r"\RequirePackage{microtype}" in workspace_text
+    assert "tracking=smallcaps" not in workspace_text
+
+
+def test_has_microtype_tracking_error_handles_wrapped_pdftex_word():
+    compiler = LaTeXCompiler()
+    log = (
+        "./main.tex:377: Package microtype Error: The tracking feature only works "
+        "with p\n"
+        "(microtype)                dftex 1.40\n"
+    )
+    assert compiler._has_microtype_tracking_error(log) is True
+
+
+def test_extract_error_detects_package_error_without_bang():
+    compiler = LaTeXCompiler()
+    log = (
+        "Random line\n"
+        "./main.tex:377: Package microtype Error: The tracking feature only works "
+        "with pdftex 1.40\n"
+        "(microtype)                or newer. Switching it off.\n"
+        "See the microtype package documentation for explanation.\n"
+    )
+    extracted = compiler._extract_error(log)
+    assert "Package microtype Error" in extracted
+    assert "Switching it off." in extracted
+
+
+def test_compile_reports_latest_round_error_after_fallback(monkeypatch, tmp_path: Path):
+    compiler = LaTeXCompiler()
+    compiler.engines = ["xelatex"]
+    call_count = {"n": 0}
+    microtype_log = (
+        "./main.tex:377: Package microtype Error: The tracking feature only works "
+        "with p\n"
+        "(microtype)                dftex 1.40\n"
+        "(microtype)                or newer. Switching it off.\n"
+    )
+
+    def fake_run_engine(engine, source_file, cwd, latex_source):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return (
+                False,
+                "! LaTeX Error: File `bxcoloremoji-names.def' not found.\n",
+                "Compilation command exited with code 1. ! LaTeX Error: File `bxcoloremoji-names.def' not found.",
+            )
+        return (
+            False,
+            microtype_log,
+            "Compilation command exited with code 1. "
+            "Package microtype Error: The tracking feature only works with p dftex 1.40",
+        )
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which", lambda _engine: "/usr/bin/true"
+    )
+    monkeypatch.setattr(compiler, "_run_engine", fake_run_engine)
+
+    result = compiler.compile(
+        latex_source=(
+            r"\documentclass{article}"
+            r"\usepackage{bxcoloremoji}"
+            r"\begin{document}x\end{document}"
+        ),
+        output_path=tmp_path / "out.pdf",
+    )
+
+    assert result.success is False
+    assert call_count["n"] == 2
+    assert result.error_message is not None
+    assert "microtype error" in result.error_message.lower()
+    assert "bxcoloremoji-names.def" not in result.error_message

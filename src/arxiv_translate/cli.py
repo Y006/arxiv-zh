@@ -1,4 +1,5 @@
 import asyncio
+import importlib.metadata as metadata
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -38,7 +39,7 @@ app = typer.Typer(
     name="arx",
     help="arxiv-translate - arXiv Paper Translator",
     add_completion=False,
-    no_args_is_help=True,
+    no_args_is_help=False,
 )
 config_app = typer.Typer(help="Manage configuration")
 glossary_app = typer.Typer(help="Manage glossary terms")
@@ -48,6 +49,40 @@ app.add_typer(glossary_app, name="glossary")
 app.add_typer(cache_app, name="cache")
 
 console = Console()
+
+
+def _resolve_cli_version() -> str:
+    for package_name in ("arxiv-translate", "ieeA"):
+        try:
+            return metadata.version(package_name)
+        except metadata.PackageNotFoundError:
+            continue
+        except Exception:
+            continue
+    return "unknown"
+
+
+def _version_callback(value: bool) -> None:
+    if not value:
+        return
+    console.print(_resolve_cli_version(), markup=False)
+    raise typer.Exit(code=0)
+
+
+@app.callback(invoke_without_command=True)
+def root_callback(
+    ctx: typer.Context,
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show version and exit",
+    ),
+) -> None:
+    if ctx.invoked_subcommand is None and not version:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(code=0)
 
 
 def _print_provider_cache_summary(provider: Any) -> None:

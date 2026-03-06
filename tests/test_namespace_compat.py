@@ -2,6 +2,8 @@ import importlib
 import sys
 import warnings
 
+from typer.testing import CliRunner
+
 
 def test_import_ieea_emits_deprecation_warning():
     sys.modules.pop("ieeA", None)
@@ -41,3 +43,14 @@ def test_legacy_cli_warns_and_delegates(monkeypatch):
     assert called["value"] is True
     messages = [str(item.message) for item in caught]
     assert any("deprecated" in message.lower() and "arxiv-translate" in message for message in messages)
+
+
+def test_legacy_cli_app_supports_version_option(monkeypatch):
+    legacy_cli = importlib.import_module("ieeA.cli")
+    monkeypatch.setattr("arxiv_translate.cli._resolve_cli_version", lambda: "8.8.8")
+    runner = CliRunner()
+
+    result = runner.invoke(legacy_cli.app, ["--version"])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "8.8.8"

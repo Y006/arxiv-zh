@@ -152,9 +152,9 @@ class TestEdgeCases:
 class TestSpecialCharsNotEscaped:
     """Test that certain special chars are NOT escaped (as per requirements)."""
 
-    def test_underscore_not_escaped(self):
-        """Underscore should NOT be escaped"""
-        assert escape_latex_special_chars("foo_bar") == "foo_bar"
+    def test_underscore_escaped(self):
+        """Bare underscores in translated prose should be escaped."""
+        assert escape_latex_special_chars("foo_bar") == "foo\\_bar"
 
     def test_dollar_not_escaped(self):
         """Dollar should NOT be escaped"""

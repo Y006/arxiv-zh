@@ -136,6 +136,10 @@ class LaTeXParser:
             nested_chunk_ids.update(
                 re.findall(r"\{\{CHUNK_([a-f0-9-]+)\}\}", chunk.content)
             )
+            for preserved_text in chunk.preserved_elements.values():
+                nested_chunk_ids.update(
+                    re.findall(r"\{\{CHUNK_([a-f0-9-]+)\}\}", preserved_text)
+                )
         chunk_ids_in_global_placeholders = set()
         for original in self.placeholder_map.values():
             chunk_ids_in_global_placeholders.update(
@@ -192,6 +196,7 @@ class LaTeXParser:
             if brace_count == 0:
                 # Extract the full author block including \author{...}
                 full_block = match.group(0) + text[start:i]
+                full_block = self._extract_translatable_thanks_content(full_block)
 
                 self.protected_counter += 1
                 placeholder = f"[[AUTHOR_{self.protected_counter}]]"
@@ -212,6 +217,67 @@ class LaTeXParser:
                 # to avoid swallowing the rest of the document
                 result.append(match.group(0))
                 pos = match.end()
+
+        result.append(text[pos:])
+        return "".join(result)
+
+    def _create_inline_chunk_placeholder(
+        self,
+        content: str,
+        context: str,
+    ) -> Optional[str]:
+        stripped_content = content.strip()
+        is_existing_chunk_placeholder = bool(
+            re.fullmatch(r"\{\{CHUNK_[a-f0-9-]+\}\}", stripped_content)
+            or re.fullmatch(r"\{CHUNK_[a-f0-9-]+\}", stripped_content)
+        )
+        if (
+            not stripped_content
+            or stripped_content.startswith("[[")
+            or is_existing_chunk_placeholder
+        ):
+            return None
+
+        chunk_id = str(uuid.uuid4())
+        placeholder = f"{{{{CHUNK_{chunk_id}}}}}"
+        leading_ws_len = len(content) - len(content.lstrip())
+        trailing_ws_len = len(content) - len(content.rstrip())
+        leading_ws = content[:leading_ws_len]
+        trailing_ws = content[len(content) - trailing_ws_len :] if trailing_ws_len else ""
+
+        chunk = Chunk(
+            id=chunk_id,
+            content=stripped_content,
+            latex_wrapper="%s",
+            context=context,
+            preserved_elements={},
+        )
+        self.chunks.append(chunk)
+
+        return f"{leading_ws}{placeholder}{trailing_ws}"
+
+    def _extract_translatable_thanks_content(self, text: str) -> str:
+        pattern = re.compile(r"\\thanks(?![A-Za-z])")
+        result = []
+        pos = 0
+
+        for match in pattern.finditer(text):
+            cmd_start = match.start()
+            cursor = self._skip_whitespace(text, match.end())
+            if cursor >= len(text) or text[cursor] != "{":
+                continue
+
+            content, body_end = self._parse_balanced_group(text, cursor, "{", "}")
+            if content is None or body_end is None:
+                continue
+
+            result.append(text[pos:cmd_start])
+            replacement = self._create_inline_chunk_placeholder(content, "thanks")
+            if replacement is None:
+                result.append(text[cmd_start:body_end])
+            else:
+                result.append(text[cmd_start : cursor + 1] + replacement + "}")
+            pos = body_end
 
         result.append(text[pos:])
         return "".join(result)
@@ -619,7 +685,14 @@ class LaTeXParser:
     def _protect_commands(self, text: str) -> str:
         commands_with_brace_counting = [
             ("cite", "CITE"),
+            ("citet", "CITE"),
+            ("citep", "CITE"),
             ("ref", "REF"),
+            ("pageref", "REF"),
+            ("autoref", "REF"),
+            ("nameref", "REF"),
+            ("cref", "REF"),
+            ("Cref", "REF"),
             ("eqref", "REF"),
             ("label", "LABEL"),
             ("url", "URL"),
@@ -989,7 +1062,9 @@ class LaTeXParser:
                     para_text = "\n".join(current_para)
                     result_lines.append(self._maybe_chunk_paragraph(para_text))
                     current_para = []
-                result_lines.append(line)
+                result_lines.append(
+                    self._extract_translatable_structural_line_fragments(line)
+                )
             elif stripped == "":
                 if current_para:
                     para_text = "\n".join(current_para)
@@ -1021,6 +1096,8 @@ class LaTeXParser:
             r"^\\maketitle",
             r"^\\bibliographystyle",
             r"^\\bibliography",
+            r"^\\input",
+            r"^\\include",
             r"^\\tableofcontents",
             r"^\\listoffigures",
             r"^\\listoftables",
@@ -1046,6 +1123,105 @@ class LaTeXParser:
                 return True
         return False
 
+    def _clean_inline_fragment_for_chunking(self, fragment: str) -> str:
+        clean_text = fragment
+        for placeholder in re.findall(r"\[\[[A-Z_]+_\d+\]\]", fragment):
+            clean_text = clean_text.replace(placeholder, "")
+        for placeholder in re.findall(r"\{\{CHUNK_[a-f0-9-]+\}\}", fragment):
+            clean_text = clean_text.replace(placeholder, "")
+
+        clean_text = re.sub(
+            r"\\(?:cite\w*|ref|eqref|autoref|label|url|href)\*?"
+            r"(?:\[[^\]]*\])?(?:\{[^}]*\}){1,2}",
+            "",
+            clean_text,
+        )
+        clean_text = re.sub(r"\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?", "", clean_text)
+        clean_text = re.sub(r"[{}\[\]\\]", "", clean_text)
+        clean_text = re.sub(r"\s+", " ", clean_text)
+        return clean_text.strip()
+
+    def _maybe_chunk_inline_fragment(
+        self,
+        fragment: str,
+        context: str,
+        min_clean_length: int = 6,
+    ) -> Optional[str]:
+        clean_text = self._clean_inline_fragment_for_chunking(fragment)
+        if len(clean_text) < min_clean_length:
+            return None
+        if not re.search(r"[A-Za-z]", clean_text):
+            return None
+        return self._create_inline_chunk_placeholder(fragment, context)
+
+    def _extract_emphasis_chunks_from_structural_line(self, line: str) -> str:
+        pattern = re.compile(r"(\\emph\s*\{)")
+        result = []
+        pos = 0
+
+        for match in pattern.finditer(line):
+            cmd_start = match.start()
+            content, body_end = self._parse_balanced_group(
+                line,
+                match.end() - 1,
+                "{",
+                "}",
+            )
+            if content is None or body_end is None:
+                continue
+
+            result.append(line[pos:cmd_start])
+            replacement = self._maybe_chunk_inline_fragment(content, "structural_label")
+            if replacement is None:
+                result.append(line[cmd_start:body_end])
+            else:
+                result.append(line[cmd_start : match.end()] + replacement + "}")
+            pos = body_end
+
+        result.append(line[pos:])
+        return "".join(result)
+
+    def _find_structural_option_boundary(self, line: str, start: int) -> int:
+        option_match = re.search(r",\s*[A-Za-z][A-Za-z\s-]*\s*=", line[start:])
+        if option_match:
+            return start + option_match.start()
+        closing_idx = line.find("]", start)
+        if closing_idx != -1:
+            return closing_idx
+        return len(line)
+
+    def _extract_plain_forest_label_from_structural_line(self, line: str) -> str:
+        stripped = line.lstrip()
+        if not stripped.startswith("["):
+            return line
+
+        if "\\includegraphics" in line and "\\\\" in line:
+            label_start = line.rfind("\\\\") + 2
+        else:
+            label_start = line.find("[") + 1
+
+        if label_start <= 0 or label_start >= len(line):
+            return line
+
+        label_end = self._find_structural_option_boundary(line, label_start)
+        if label_end <= label_start:
+            return line
+
+        fragment = line[label_start:label_end]
+        if any(token in fragment for token in ("\\cite", "\\includegraphics", "{{CHUNK_")):
+            return line
+
+        replacement = self._maybe_chunk_inline_fragment(fragment, "structural_label")
+        if replacement is None:
+            return line
+
+        return line[:label_start] + replacement + line[label_end:]
+
+    def _extract_translatable_structural_line_fragments(self, line: str) -> str:
+        updated_line = self._extract_emphasis_chunks_from_structural_line(line)
+        updated_line = self._extract_plain_forest_label_from_structural_line(updated_line)
+        return updated_line
+
     def _maybe_chunk_paragraph(self, para_text: str) -> str:
         if is_placeholder_only(para_text):
             return para_text
@@ -1056,10 +1232,18 @@ class LaTeXParser:
         for placeholder in re.findall(r"\{\{CHUNK_[a-f0-9-]+\}\}", para_text):
             text_content = text_content.replace(placeholder, "")
 
+        # Drop metadata-like commands entirely, but keep visible text wrapped by
+        # formatting commands such as \textcolor{black}{...} so wrapped prose can
+        # still be detected as a translatable paragraph.
         clean_text = re.sub(
-            r"\\[a-zA-Z]+\*?(?:\[[^\]]*\])?(?:\{[^}]*\})*", "", text_content
+            r"\\(?:cite\w*|ref|eqref|autoref|label|url|href)\*?"
+            r"(?:\[[^\]]*\])?(?:\{[^}]*\}){1,2}",
+            "",
+            text_content,
         )
+        clean_text = re.sub(r"\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?", "", clean_text)
         clean_text = re.sub(r"[{}\[\]\\]", "", clean_text)
+        clean_text = re.sub(r"\s+", " ", clean_text)
         clean_text = clean_text.strip()
 
         if len(clean_text) < 20:

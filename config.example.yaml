@@ -1,0 +1,30 @@
+provider:
+  name: deepseek
+  type: openai_compatible
+  base_url: https://api.deepseek.com
+  model: deepseek-chat
+  api_key_env: DEEPSEEK_API_KEY
+
+translation:
+  temperature: 0.1
+  max_tokens: 4000
+  timeout: 120
+  retries: 3
+  concurrency: 3
+
+fonts:
+  dir: ./fonts
+  auto_detect: true
+  main: STSong
+  sans: STXihei
+  mono: STKaiti
+
+compile:
+  engine: xelatex
+  prefer_latexmk: true
+  tinytex_paths:
+    - ~/Library/TinyTeX/bin/universal-darwin/
+    - /Library/TeX/texbin/
+
+output:
+  root: ./output

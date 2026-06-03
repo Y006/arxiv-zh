@@ -49,13 +49,20 @@ class ArxivDownloader:
             
         raise ValueError(f"Could not parse arXiv ID from: {input_str}")
 
-    def download(self, arxiv_id_or_url: str, output_dir: Path) -> DownloadResult:
+    def download(
+        self,
+        arxiv_id_or_url: str,
+        output_dir: Path,
+        extract_dir: Optional[Path] = None,
+    ) -> DownloadResult:
         """
         Download and extract source files for a given arXiv ID/URL.
         
         Args:
             arxiv_id_or_url: arXiv ID or URL
             output_dir: Directory to extract files to
+            extract_dir: Optional exact extraction directory. When omitted,
+                         files are extracted to output_dir / arxiv_id.
             
         Returns:
             DownloadResult containing paths and metadata
@@ -87,7 +94,7 @@ class ArxivDownloader:
                 raise e
         
         # Extract files
-        extract_dir = output_dir / arxiv_id
+        extract_dir = extract_dir or (output_dir / arxiv_id)
         # Clean extract dir if exists to ensure fresh extraction
         if extract_dir.exists():
             shutil.rmtree(extract_dir)

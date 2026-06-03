@@ -19,15 +19,16 @@ class LLMConfig(BaseModel):
     def validate_sdk(cls, v):
         if v is not None and v not in (
             "openai",
-            "openai-coding",
-            "anthropic",
-            "anthropic-coding",
-            "bailian",
-        ):
-            raise ValueError(
-                "sdk must be 'openai', 'openai-coding', 'anthropic', "
-                f"'anthropic-coding', 'bailian', or None, got '{v}'"
-            )
+                "openai-coding",
+                "anthropic",
+                "anthropic-coding",
+                "bailian",
+                "deepseek",
+            ):
+                raise ValueError(
+                    "sdk must be 'openai', 'openai-coding', 'anthropic', "
+                    f"'anthropic-coding', 'bailian', 'deepseek', or None, got '{v}'"
+                )
         return v
 
     @field_validator("models")

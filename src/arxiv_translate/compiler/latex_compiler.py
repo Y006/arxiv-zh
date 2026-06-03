@@ -14,6 +14,76 @@ from .chinese_support import (
 )
 
 
+def _first_log_context(
+    lines: List[str],
+    pattern: str,
+    *,
+    flags: int = re.IGNORECASE,
+    context_lines: int = 3,
+) -> Optional[str]:
+    regex = re.compile(pattern, flags)
+    for index, line in enumerate(lines):
+        if regex.search(line):
+            return "\n".join(lines[index : min(index + context_lines, len(lines))])
+    return None
+
+
+def build_compile_error_summary(log_content: str) -> str:
+    """Build a concise markdown summary from a LaTeX compile log."""
+    lines = (log_content or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()
+
+    sections: List[Tuple[str, Optional[str]]] = [
+        (
+            "First LaTeX Error",
+            _first_log_context(lines, r"(?:^!\s*)?LaTeX\s+Error:|^!\s*LaTeX\s+Error:"),
+        ),
+        (
+            "First Undefined control sequence",
+            _first_log_context(lines, r"Undefined control sequence\."),
+        ),
+        (
+            "First Missing $ inserted",
+            _first_log_context(lines, r"Missing\s+\$\s+inserted\."),
+        ),
+        (
+            "First Missing file",
+            _first_log_context(lines, r"File\s+[`'][^`']+[`']\s+not\s+found"),
+        ),
+    ]
+
+    output = ["# Compile Error Summary", ""]
+    for title, content in sections:
+        output.append(f"## {title}")
+        output.append("")
+        if content:
+            output.append("```text")
+            output.append(content)
+            output.append("```")
+        else:
+            output.append("Not found.")
+        output.append("")
+
+    output.append("## Last 80 log lines")
+    output.append("")
+    output.append("```text")
+    output.extend(lines[-80:] if lines else ["<empty log>"])
+    output.append("```")
+    output.append("")
+    return "\n".join(output)
+
+
+def write_compile_error_summary(log_path: Path, summary_path: Path) -> Path:
+    log_content = ""
+    if log_path.exists():
+        log_content = log_path.read_text(encoding="utf-8", errors="replace")
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(
+        build_compile_error_summary(log_content),
+        encoding="utf-8",
+    )
+    return summary_path
+
+
 @dataclass
 class CompilationResult:
     success: bool
@@ -33,6 +103,147 @@ class LaTeXCompiler:
     def inject_chinese_support(self, latex_source: str) -> str:
         """Wrapper around the injection logic."""
         return inject_chinese_support(latex_source)
+
+    def _build_env(self) -> Dict[str, str]:
+        env = os.environ.copy()
+        if self.fonts_dir and self.fonts_dir.exists():
+            existing_font_dirs = env.get("OSFONTDIR", "").strip()
+            if existing_font_dirs:
+                env["OSFONTDIR"] = (
+                    f"{str(self.fonts_dir)}{os.pathsep}{existing_font_dirs}"
+                )
+            else:
+                env["OSFONTDIR"] = str(self.fonts_dir)
+        return env
+
+    def compile_file(
+        self,
+        tex_file: Union[str, Path],
+        output_path: Union[str, Path],
+        logs_dir: Union[str, Path],
+        build_dir: Optional[Union[str, Path]] = None,
+        prefer_latexmk: bool = True,
+    ) -> CompilationResult:
+        """Compile an existing TeX file while preserving logs and build artifacts."""
+        tex_file = Path(tex_file).resolve()
+        output_path = Path(output_path).resolve()
+        logs_dir = Path(logs_dir).resolve()
+        build_path = Path(build_dir).resolve() if build_dir else logs_dir / "build"
+        log_path = logs_dir / "compile.log"
+        summary_path = logs_dir / "compile_error_summary.md"
+
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        build_path.mkdir(parents=True, exist_ok=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("", encoding="utf-8")
+
+        if not tex_file.exists():
+            message = f"TeX file not found: {tex_file}"
+            log_path.write_text(message, encoding="utf-8")
+            write_compile_error_summary(log_path, summary_path)
+            return CompilationResult(success=False, log_content=message, error_message=message)
+
+        def run_command(cmd: List[str]) -> Tuple[bool, str, Optional[str]]:
+            header = f"$ {' '.join(cmd)}\n"
+            with log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(header)
+            try:
+                process = subprocess.run(
+                    cmd,
+                    cwd=tex_file.parent,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=self._build_env(),
+                )
+                combined_log = process.stdout + "\n" + process.stderr
+                with log_path.open("a", encoding="utf-8") as log_file:
+                    log_file.write(combined_log)
+                    log_file.write("\n")
+                if process.returncode != 0:
+                    return (
+                        False,
+                        log_path.read_text(encoding="utf-8", errors="replace"),
+                        f"Compilation command exited with code {process.returncode}.",
+                    )
+                return True, log_path.read_text(encoding="utf-8", errors="replace"), None
+            except subprocess.TimeoutExpired:
+                message = "Compilation timed out"
+                with log_path.open("a", encoding="utf-8") as log_file:
+                    log_file.write(message + "\n")
+                return False, log_path.read_text(encoding="utf-8", errors="replace"), message
+            except Exception as exc:
+                message = str(exc)
+                with log_path.open("a", encoding="utf-8") as log_file:
+                    log_file.write(message + "\n")
+                return False, log_path.read_text(encoding="utf-8", errors="replace"), message
+
+        engine_used: Optional[str] = None
+        success = False
+        log_content = ""
+        error: Optional[str] = None
+
+        if prefer_latexmk and shutil.which("latexmk"):
+            engine_used = "latexmk"
+            success, log_content, error = run_command(
+                [
+                    "latexmk",
+                    "-xelatex",
+                    "-interaction=nonstopmode",
+                    "-file-line-error",
+                    f"-output-directory={build_path}",
+                    tex_file.name,
+                ]
+            )
+        else:
+            if not shutil.which("xelatex"):
+                message = "Neither latexmk nor xelatex was found on PATH."
+                log_path.write_text(message, encoding="utf-8")
+                write_compile_error_summary(log_path, summary_path)
+                return CompilationResult(
+                    success=False,
+                    log_content=message,
+                    error_message=message,
+                    engine_used=None,
+                )
+            engine_used = "xelatex"
+            for _ in range(4):
+                success, log_content, error = run_command(
+                    [
+                        "xelatex",
+                        "-interaction=nonstopmode",
+                        "-file-line-error",
+                        f"-output-directory={build_path}",
+                        tex_file.name,
+                    ]
+                )
+                if not success:
+                    break
+
+        built_pdf = build_path / f"{tex_file.stem}.pdf"
+        if success and self._is_pdf_healthy(built_pdf):
+            shutil.copy2(built_pdf, output_path)
+            if self._is_pdf_healthy(output_path):
+                return CompilationResult(
+                    success=True,
+                    pdf_path=output_path,
+                    log_content=log_content,
+                    engine_used=engine_used,
+                )
+            error = "Generated PDF failed integrity check after copy."
+        elif success:
+            error = "Generated PDF failed integrity check (%PDF/%%EOF)."
+
+        log_content = log_path.read_text(encoding="utf-8", errors="replace")
+        write_compile_error_summary(log_path, summary_path)
+        return CompilationResult(
+            success=False,
+            log_content=log_content,
+            error_message=error or "Compilation failed.",
+            engine_used=engine_used,
+        )
 
     def compile(
         self,
@@ -643,16 +854,6 @@ class LaTeXCompiler:
             except Exception:
                 pass
 
-            env = os.environ.copy()
-            if self.fonts_dir and self.fonts_dir.exists():
-                existing_font_dirs = env.get("OSFONTDIR", "").strip()
-                if existing_font_dirs:
-                    env["OSFONTDIR"] = (
-                        f"{str(self.fonts_dir)}{os.pathsep}{existing_font_dirs}"
-                    )
-                else:
-                    env["OSFONTDIR"] = str(self.fonts_dir)
-
             process = subprocess.run(
                 cmd,
                 cwd=cwd,
@@ -661,7 +862,7 @@ class LaTeXCompiler:
                 timeout=self.timeout,
                 encoding="utf-8",
                 errors="replace",
-                env=env,
+                env=self._build_env(),
             )
 
             # Read log file if it exists, as it's more complete than stdout

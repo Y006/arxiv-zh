@@ -51,6 +51,7 @@ Repository = "https://github.com/zcyisiee/arxiv-translate"
 [project.scripts]
 arx = "arxiv_translate.cli:main"
 arxiv-translate = "arxiv_translate.cli:main"
+arxiv-zh = "arxiv_translate.cli:zh_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

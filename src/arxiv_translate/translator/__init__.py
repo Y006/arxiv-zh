@@ -1,3 +1,4 @@
+import os
 from typing import Optional, Any
 from urllib.parse import urlsplit, urlunsplit
 from .llm_base import LLMProvider
@@ -7,6 +8,10 @@ from .anthropic_provider import AnthropicProvider
 from .anthropic_coding_provider import AnthropicCodingProvider
 from .http_provider import DirectHTTPProvider
 from .ark_provider import ArkProvider
+from .deepseek_provider import DeepSeekProvider
+
+DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
 
 
 def _normalize_openai_base_url(endpoint: Optional[str]) -> Optional[str]:
@@ -107,6 +112,13 @@ def get_sdk_client(
         return OpenAIProvider(
             model=model, api_key=key, base_url=normalized_endpoint, **kwargs
         )
+    elif sdk == "deepseek":
+        return DeepSeekProvider(
+            model=model or DEEPSEEK_DEFAULT_MODEL,
+            api_key=key or os.getenv("DEEPSEEK_API_KEY"),
+            base_url=endpoint or DEEPSEEK_DEFAULT_BASE_URL,
+            **kwargs,
+        )
     elif sdk == "openai-coding":
         normalized_endpoint = _normalize_openai_base_url(endpoint)
         return OpenAICodingProvider(
@@ -142,7 +154,7 @@ def get_sdk_client(
     else:
         raise ValueError(
             "Unknown sdk: "
-            f"{sdk}. Supported: openai, openai-coding, anthropic, anthropic-coding, bailian, None"
+            f"{sdk}. Supported: openai, openai-coding, anthropic, anthropic-coding, bailian, deepseek, None"
         )
 
 
@@ -155,6 +167,7 @@ __all__ = [
     "DirectHTTPProvider",
     "ArkProvider",
     "BailianProvider",
+    "DeepSeekProvider",
     "is_ark_endpoint",
     "should_use_ark_autoroute",
     "get_sdk_client",

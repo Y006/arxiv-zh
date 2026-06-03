@@ -3,6 +3,7 @@ import inspect
 
 import arxiv_translate.cli as cli_module
 from arxiv_translate.rules.config import Config, load_defaults
+from arxiv_translate.compiler.chinese_support import get_available_fonts
 
 
 def test_default_config_includes_fonts_dir():
@@ -33,3 +34,16 @@ def test_cli_passes_fonts_dir_into_latex_compiler():
     visitor = CompilerCallVisitor()
     visitor.visit(tree)
     assert visitor.found is True
+
+
+def test_local_font_dir_scan_finds_sample_cjk_families():
+    font_dir = cli_module._project_font_dir()
+
+    families = set(get_available_fonts(font_dir=font_dir, include_system=False))
+
+    assert "STSong" in families
+    assert "STXihei" in families
+    assert "STKaiti" in families
+    assert "SimSun" in families
+    assert "SimHei" in families
+    assert "KaiTi" in families

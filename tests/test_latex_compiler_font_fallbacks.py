@@ -139,6 +139,39 @@ def test_run_single_pass_sets_osfontdir_when_fonts_dir_exists(monkeypatch, tmp_p
     assert "/existing/fonts" in captured["env"]["OSFONTDIR"]
 
 
+def test_compile_file_sets_osfontdir_when_fonts_dir_exists(monkeypatch, tmp_path: Path):
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir(parents=True, exist_ok=True)
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        r"\documentclass{article}\begin{document}x\end{document}",
+        encoding="utf-8",
+    )
+    compiler = LaTeXCompiler(fonts_dir=fonts_dir)
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured["env"] = kwargs.get("env", {})
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setenv("OSFONTDIR", "/existing/fonts")
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        lambda name: "/usr/bin/latexmk" if name == "latexmk" else None,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    compiler.compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+    )
+
+    assert "OSFONTDIR" in captured["env"]
+    assert str(fonts_dir) in captured["env"]["OSFONTDIR"]
+    assert "/existing/fonts" in captured["env"]["OSFONTDIR"]
+
+
 def test_apply_missing_file_fallback_sets_bxcoloremoji_names_false(tmp_path: Path):
     compiler = LaTeXCompiler()
     source = r"""

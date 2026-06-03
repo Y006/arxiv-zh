@@ -1,6 +1,7 @@
 import re
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Optional, List, Dict, Any, Union
 
 ENGINE_CONFLICT_PRIMITIVES = (
@@ -43,35 +44,98 @@ def _strip_engine_conflict_primitives(latex_source: str) -> str:
     return "".join(kept_lines) + body
 
 
-def get_available_fonts() -> List[str]:
+FONT_FILE_SUFFIXES = {".ttf", ".ttc", ".otf"}
+
+
+def _split_font_families(output: str) -> List[str]:
+    fonts = set()
+    for line in output.splitlines():
+        for family in line.split(","):
+            family = family.strip()
+            if family:
+                fonts.add(family)
+    return sorted(fonts)
+
+
+def get_fonts_from_dir(font_dir: Optional[Union[str, Path]]) -> List[str]:
+    """Detect font family names from font files in a local directory."""
+    if not font_dir or not shutil.which("fc-scan"):
+        return []
+
+    root = Path(font_dir).expanduser()
+    if not root.exists() or not root.is_dir():
+        return []
+
+    font_files = sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() in FONT_FILE_SUFFIXES
+    )
+    if not font_files:
+        return []
+
+    try:
+        result = subprocess.run(
+            ["fc-scan", "--format", "%{family}\n", *[str(path) for path in font_files]],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            return []
+        return _split_font_families(result.stdout)
+    except Exception:
+        return []
+
+
+def get_system_fonts() -> List[str]:
     """Detect available CJK fonts using fc-list."""
     if not shutil.which("fc-list"):
         return []
 
     try:
-        # Check specifically for Chinese fonts
         result = subprocess.run(
             ["fc-list", ":lang=zh", "family"], capture_output=True, text=True, timeout=5
         )
         if result.returncode != 0:
             return []
-
-        fonts = set()
-        for line in result.stdout.splitlines():
-            # Output format: "Font Family,Font Name,..."
-            # Get the first family name
-            families = line.split(",")
-            for family in families:
-                fonts.add(family.strip())
-        return list(fonts)
+        return _split_font_families(result.stdout)
     except Exception:
         return []
+
+
+def get_available_fonts(
+    font_dir: Optional[Union[str, Path]] = None,
+    include_system: bool = True,
+) -> List[str]:
+    """Detect fonts from a local font directory first, then system fonts."""
+    fonts: List[str] = []
+    seen = set()
+
+    def add_many(values: List[str]) -> None:
+        for value in values:
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            fonts.append(value)
+
+    add_many(get_fonts_from_dir(font_dir))
+    if include_system:
+        add_many(get_system_fonts())
+    return fonts
 
 
 def detect_cjk_fonts(available_fonts: List[str]) -> Dict[str, str]:
     """Select best available CJK fonts based on priority."""
     # Priority groups: (Serif, Sans, Mono)
     font_candidates = [
+        # Project-local sample bundle
+        {
+            "main": ["STSong", "SimSun"],
+            "sans": ["STXihei", "SimHei"],
+            "mono": ["STKaiti", "KaiTi"],
+        },
         # Noto CJK (Google/Adobe) - Preferred
         {
             "main": ["Noto Serif CJK SC", "Noto Serif CJK"],
@@ -87,8 +151,8 @@ def detect_cjk_fonts(available_fonts: List[str]) -> Dict[str, str]:
         # macOS Chinese Fonts
         {
             "main": ["Songti SC", "STSong"],
-            "sans": ["PingFang SC", "STHeiti"],
-            "mono": ["STFangsong"],
+            "sans": ["PingFang SC", "Heiti SC", "Hiragino Sans GB", "STHeiti"],
+            "mono": ["STFangsong", "FangSong_GB2312", "FZFangSong-Z02"],
         },
         # Windows Chinese Fonts
         {

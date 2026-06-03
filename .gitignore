@@ -1,5 +1,10 @@
 
+# macOS
+.DS_Store
+**/.DS_Store
+
 # Testing & Coverage
+.pytest_cache/
 .coverage
 htmlcov/
 coverage.xml
@@ -16,18 +21,39 @@ dmypy.json
 .ruff_cache/
 
 # Environment
-.venv
+.venv/
 venv/
 ENV/
+.env
+.env.*
+!.env.example
 
 # Python cache
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
 
 # Output and cache
 output/
 papers_cache/
+.cache/
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+*.toc
 
 # IDE
 .idea/

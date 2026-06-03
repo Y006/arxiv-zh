@@ -1,6 +1,9 @@
 import asyncio
 import importlib.metadata as metadata
+import os
+import shutil
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -20,9 +23,13 @@ from rich.table import Table
 
 from arxiv_translate.cache.local_translation_cache import LocalTranslationCache
 from arxiv_translate.compiler import LaTeXCompiler
+from arxiv_translate.compiler.chinese_support import (
+    detect_cjk_fonts,
+    get_available_fonts,
+)
 from arxiv_translate.downloader.arxiv import ArxivDownloader
 from arxiv_translate.parser.latex_parser import LaTeXParser
-from arxiv_translate.rules.config import load_config
+from arxiv_translate.rules.config import Config, deep_merge, load_config, load_defaults
 from arxiv_translate.rules.glossary import load_glossary
 from arxiv_translate.rules.examples import load_examples
 from arxiv_translate.rules.user_paths import (
@@ -42,6 +49,12 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=False,
 )
+zh_app = typer.Typer(
+    name="arxiv-zh",
+    help="arxiv-zh - local DeepSeek-powered arXiv paper translator",
+    add_completion=False,
+    no_args_is_help=True,
+)
 config_app = typer.Typer(help="Manage configuration")
 glossary_app = typer.Typer(help="Manage glossary terms")
 cache_app = typer.Typer(help="Manage local translation cache")
@@ -50,6 +63,209 @@ app.add_typer(glossary_app, name="glossary")
 app.add_typer(cache_app, name="cache")
 
 console = Console()
+
+
+@dataclass
+class ArxivZhOutputLayout:
+    root: Path
+    source_dir: Path
+    translated_dir: Path
+    pdf_dir: Path
+    cache_dir: Path
+    logs_dir: Path
+    translate_log: Path
+    compile_log: Path
+    report: Path
+
+
+@dataclass
+class ArxivZhOptions:
+    provider: str
+    output: Path
+    config: Optional[Path]
+    concurrency: int
+    api_key: str
+    font_dir: Optional[Path] = None
+    cjk_main_font: Optional[str] = None
+    cjk_sans_font: Optional[str] = None
+    cjk_mono_font: Optional[str] = None
+    font_auto: Optional[bool] = None
+    model: str = "deepseek-chat"
+    endpoint: str = "https://api.deepseek.com"
+
+
+def _append_text_log(path: Path, message: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as log_file:
+        log_file.write(message.rstrip() + "\n")
+
+
+def _prepare_arxiv_zh_output_dirs(output: Path) -> ArxivZhOutputLayout:
+    root = Path(output).expanduser().resolve()
+    layout = ArxivZhOutputLayout(
+        root=root,
+        source_dir=root / "source",
+        translated_dir=root / "translated",
+        pdf_dir=root / "pdf",
+        cache_dir=root / "cache",
+        logs_dir=root / "logs",
+        translate_log=root / "logs" / "translate.log",
+        compile_log=root / "logs" / "compile.log",
+        report=root / "translation_report.md",
+    )
+    for path in (
+        layout.source_dir,
+        layout.translated_dir,
+        layout.pdf_dir,
+        layout.cache_dir,
+        layout.logs_dir,
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+    return layout
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _project_font_dir() -> Path:
+    return _project_root() / "fonts"
+
+
+def _resolve_arxiv_zh_options(
+    *,
+    provider: str,
+    output: Path,
+    config: Optional[Path],
+    concurrency: int,
+    font_dir: Optional[Path] = None,
+    cjk_main_font: Optional[str] = None,
+    cjk_sans_font: Optional[str] = None,
+    cjk_mono_font: Optional[str] = None,
+    font_auto: Optional[bool] = None,
+    model: str = "deepseek-chat",
+) -> ArxivZhOptions:
+    if provider != "deepseek":
+        raise ValueError("arxiv-zh only supports --provider deepseek in v1.")
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "DEEPSEEK_API_KEY is required. Export it before running arxiv-zh."
+        )
+    if concurrency < 1:
+        raise ValueError("--concurrency must be at least 1.")
+    return ArxivZhOptions(
+        provider=provider,
+        output=output,
+        config=config,
+        concurrency=concurrency,
+        api_key=api_key,
+        font_dir=font_dir,
+        cjk_main_font=cjk_main_font,
+        cjk_sans_font=cjk_sans_font,
+        cjk_mono_font=cjk_mono_font,
+        font_auto=font_auto,
+        model=model,
+    )
+
+
+def _load_config_for_arxiv_zh(
+    config_path: Optional[Path],
+    *,
+    font_dir: Optional[Path] = None,
+    cjk_main_font: Optional[str] = None,
+    cjk_sans_font: Optional[str] = None,
+    cjk_mono_font: Optional[str] = None,
+    font_auto: Optional[bool] = None,
+) -> Config:
+    if config_path is None:
+        config = load_config()
+    else:
+        if not config_path.exists():
+            raise ValueError(f"Config file not found: {config_path}")
+        with config_path.open("r", encoding="utf-8") as config_file:
+            user_data = yaml.safe_load(config_file) or {}
+        config = Config(**deep_merge(load_defaults(), user_data))
+
+    resolved_font_dir = Path(font_dir).expanduser().resolve() if font_dir else None
+    if resolved_font_dir is None:
+        configured_dir = getattr(config.fonts, "dir", None)
+        if configured_dir:
+            resolved_font_dir = Path(configured_dir).expanduser()
+            if not resolved_font_dir.is_absolute():
+                if config_path is None and resolved_font_dir == Path("fonts"):
+                    resolved_font_dir = _project_font_dir().resolve()
+                else:
+                    resolved_font_dir = (_project_root() / resolved_font_dir).resolve()
+
+    project_font_dir = _project_font_dir()
+    if resolved_font_dir is None and project_font_dir.exists():
+        resolved_font_dir = project_font_dir
+
+    if resolved_font_dir is not None:
+        config.fonts.dir = str(resolved_font_dir)
+
+    if font_auto is not None:
+        config.fonts.auto_detect = font_auto
+    elif config_path is None:
+        config.fonts.auto_detect = True
+
+    if config.fonts.auto_detect:
+        detected_fonts = detect_cjk_fonts(get_available_fonts(font_dir=resolved_font_dir))
+        config.fonts.main = detected_fonts["main"]
+        config.fonts.sans = detected_fonts["sans"]
+        config.fonts.mono = detected_fonts["mono"]
+
+    if cjk_main_font:
+        config.fonts.main = cjk_main_font
+    if cjk_sans_font:
+        config.fonts.sans = cjk_sans_font
+    if cjk_mono_font:
+        config.fonts.mono = cjk_mono_font
+
+    return config
+
+
+def _copy_source_tree_to_translated(source_dir: Path, translated_dir: Path) -> None:
+    for item in source_dir.iterdir():
+        target = translated_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, target)
+
+
+def _write_arxiv_zh_report(
+    layout: ArxivZhOutputLayout,
+    *,
+    arxiv_id: str,
+    status: str,
+    translated_chunks: int,
+    total_chunks: int,
+    pdf_path: Optional[Path] = None,
+    error: Optional[str] = None,
+) -> None:
+    lines = [
+        "# Translation Report",
+        "",
+        f"- arXiv ID: `{arxiv_id}`",
+        f"- Status: `{status}`",
+        f"- Translated chunks: `{translated_chunks}/{total_chunks}`",
+        f"- Output root: `{layout.root}`",
+        f"- Translated TeX: `{layout.translated_dir / 'main_zh.tex'}`",
+    ]
+    if pdf_path:
+        lines.append(f"- PDF: `{pdf_path}`")
+    if error:
+        lines.append(f"- Error: `{error}`")
+    lines.extend(
+        [
+            f"- Translate log: `{layout.translate_log}`",
+            f"- Compile log: `{layout.compile_log}`",
+            "",
+        ]
+    )
+    layout.report.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _resolve_cli_version() -> str:
@@ -708,6 +924,352 @@ def translate(
     asyncio.run(run_pipeline())
 
 
+def _run_arxiv_zh_pipeline(
+    *,
+    arxiv_id: str,
+    options: ArxivZhOptions,
+    compile_pdf: bool,
+    max_chunks: Optional[int],
+) -> None:
+    layout = _prepare_arxiv_zh_output_dirs(options.output)
+    layout.translate_log.write_text("", encoding="utf-8")
+    _append_text_log(layout.translate_log, f"Starting arxiv-zh job for {arxiv_id}")
+
+    if max_chunks is not None and max_chunks < 1:
+        raise ValueError("--max-chunks must be at least 1 when provided.")
+
+    async def run_pipeline() -> None:
+        local_cache: Optional[LocalTranslationCache] = None
+        download_result = None
+        translated_count = 0
+        total_chunks = 0
+        try:
+            config = _load_config_for_arxiv_zh(
+                options.config,
+                font_dir=options.font_dir,
+                cjk_main_font=options.cjk_main_font,
+                cjk_sans_font=options.cjk_sans_font,
+                cjk_mono_font=options.cjk_mono_font,
+                font_auto=options.font_auto,
+            )
+            config.llm.sdk = "deepseek"
+            config.llm.models = options.model
+            config.llm.key = options.api_key
+            config.llm.endpoint = options.endpoint
+            config.llm.temperature = 0.1
+            config.paths.cache_dir = str(layout.cache_dir)
+            config.cache.enabled = True
+
+            _append_text_log(layout.translate_log, "Downloading source")
+            downloader = ArxivDownloader(cache_dir=layout.cache_dir / "downloads")
+            download_result = downloader.download(
+                arxiv_id,
+                layout.root,
+                extract_dir=layout.source_dir,
+            )
+            _append_text_log(
+                layout.translate_log,
+                f"Downloaded {download_result.arxiv_id} to {layout.source_dir}",
+            )
+
+            _append_text_log(layout.translate_log, "Parsing LaTeX")
+            parser = LaTeXParser(
+                extra_protected_envs=config.parser.extra_protected_environments,
+                font_config=config.fonts,
+            )
+            doc = parser.parse_file(str(download_result.main_tex))
+            total_chunks = len(doc.chunks)
+            doc.save_parser_state(layout.cache_dir / "parser_state.json")
+            _append_text_log(layout.translate_log, f"Parsed {total_chunks} chunks")
+
+            glossary = load_glossary()
+            provider = get_sdk_client(
+                "deepseek",
+                model=options.model,
+                key=options.api_key,
+                endpoint=options.endpoint,
+                temperature=config.llm.temperature,
+            )
+
+            try:
+                local_cache = _build_local_cache(config, disabled=False)
+                if local_cache is not None:
+                    _append_text_log(
+                        layout.translate_log,
+                        f"Local cache enabled: {local_cache.db_path}",
+                    )
+            except Exception as exc:
+                local_cache = None
+                _append_text_log(
+                    layout.translate_log,
+                    f"Local cache unavailable; continuing without it: {exc}",
+                )
+
+            examples_path = getattr(config.translation, "examples_path", None)
+            examples = load_examples(examples_path) if examples_path else load_examples()
+            pipeline = TranslationPipeline(
+                provider=provider,
+                glossary=glossary,
+                state_file=layout.cache_dir / "translation_state.json",
+                few_shot_examples=examples,
+                abstract_context=getattr(doc, "abstract", "") or "",
+                custom_system_prompt=config.translation.custom_system_prompt,
+                model_name=options.model,
+                hq_mode=False,
+                batch_short_threshold=config.translation.batch_short_threshold,
+                batch_max_chars=config.translation.batch_max_chars,
+                sequential_mode=False,
+                local_cache=local_cache,
+                cache_key_mode=config.cache.key_mode,
+            )
+
+            chunk_data = [{"chunk_id": c.id, "content": c.content} for c in doc.chunks]
+            if max_chunks is not None:
+                chunk_data = chunk_data[:max_chunks]
+            _append_text_log(
+                layout.translate_log,
+                f"Translating {len(chunk_data)} of {total_chunks} chunks",
+            )
+
+            translated_chunks = await pipeline.translate_document(
+                chunks=chunk_data,
+                context="Academic Paper",
+                max_concurrent=options.concurrency,
+                progress_callback=None,
+                batch_stats_callback=None,
+            )
+            translated_count = len(translated_chunks)
+
+            translated_map = {
+                chunk.chunk_id: chunk.translation for chunk in translated_chunks
+            }
+            source_chunk_map = {chunk.id: chunk.content for chunk in doc.chunks}
+            for chunk_id, translation_text in list(translated_map.items()):
+                fixed_text, _md_audit = sanitize_markdown_bold_safe(
+                    source=source_chunk_map.get(chunk_id, ""),
+                    translation=translation_text,
+                )
+                translated_map[chunk_id] = fixed_text
+
+            translated_map, ph_issues = validate_translated_placeholders(
+                translated_map,
+                doc,
+                disable_missing_fallback_ids=set(),
+            )
+            if ph_issues:
+                _append_text_log(
+                    layout.translate_log,
+                    f"Placeholder audit produced {len(ph_issues)} issue(s)",
+                )
+
+            translated_tex, translated_chunk_start_lines = (
+                doc.reconstruct_with_chunk_start_lines(translated_map)
+            )
+
+            translated_chunks_for_validation = [
+                TranslatedChunk(
+                    source=chunk.source,
+                    translation=translated_map.get(chunk.chunk_id, chunk.translation),
+                    chunk_id=chunk.chunk_id,
+                    metadata=dict(chunk.metadata or {}),
+                )
+                for chunk in translated_chunks
+            ]
+
+            if local_cache is not None:
+                _write_local_cache_after_quality_gate(
+                    local_cache=local_cache,
+                    translated_chunks=translated_chunks_for_validation,
+                    missing_fallback_ids=set(),
+                )
+
+            if layout.translated_dir.exists():
+                shutil.rmtree(layout.translated_dir)
+            layout.translated_dir.mkdir(parents=True, exist_ok=True)
+            _copy_source_tree_to_translated(layout.source_dir, layout.translated_dir)
+            translated_tex_path = layout.translated_dir / "main_zh.tex"
+            translated_tex_path.write_text(translated_tex, encoding="utf-8")
+            _append_text_log(
+                layout.translate_log,
+                f"Wrote translated TeX to {translated_tex_path}",
+            )
+
+            original_full, source_chunk_start_lines = (
+                doc.reconstruct_with_chunk_start_lines()
+            )
+            validator = ValidationEngine()
+            val_result = validator.validate(
+                translated_tex,
+                original_full,
+                translated_chunks=translated_chunks_for_validation,
+                source_chunk_start_lines=source_chunk_start_lines,
+                translation_chunk_start_lines=translated_chunk_start_lines,
+            )
+            _append_text_log(
+                layout.translate_log,
+                f"Validation completed with {len(val_result.errors)} issue(s)",
+            )
+
+            pdf_path: Optional[Path] = None
+            if compile_pdf:
+                _append_text_log(layout.translate_log, "Compiling PDF")
+                compiler = LaTeXCompiler(
+                    timeout=config.compilation.timeout,
+                    fonts_dir=config.fonts.dir,
+                )
+                result = compiler.compile_file(
+                    translated_tex_path,
+                    layout.pdf_dir / "main_zh.pdf",
+                    logs_dir=layout.logs_dir,
+                    build_dir=layout.root / "build",
+                    prefer_latexmk=True,
+                )
+                if not result.success:
+                    error = result.error_message or "Compilation failed"
+                    _write_arxiv_zh_report(
+                        layout,
+                        arxiv_id=download_result.arxiv_id,
+                        status="compile_failed",
+                        translated_chunks=translated_count,
+                        total_chunks=total_chunks,
+                        error=error,
+                    )
+                    raise RuntimeError(error)
+                pdf_path = result.pdf_path
+
+            _write_arxiv_zh_report(
+                layout,
+                arxiv_id=download_result.arxiv_id,
+                status="success",
+                translated_chunks=translated_count,
+                total_chunks=total_chunks,
+                pdf_path=pdf_path,
+            )
+            _append_text_log(layout.translate_log, "Job completed")
+
+        except Exception as exc:
+            _append_text_log(layout.translate_log, f"Job failed: {exc}")
+            if download_result is not None:
+                _write_arxiv_zh_report(
+                    layout,
+                    arxiv_id=download_result.arxiv_id,
+                    status="failed",
+                    translated_chunks=translated_count,
+                    total_chunks=total_chunks,
+                    error=str(exc),
+                )
+            else:
+                _write_arxiv_zh_report(
+                    layout,
+                    arxiv_id=arxiv_id,
+                    status="failed",
+                    translated_chunks=translated_count,
+                    total_chunks=total_chunks,
+                    error=str(exc),
+                )
+            raise
+        finally:
+            if local_cache is not None:
+                try:
+                    local_cache.close()
+                except Exception:
+                    pass
+
+    asyncio.run(run_pipeline())
+
+
+@zh_app.command()
+def arxiv_zh_root(
+    arxiv_id: str = typer.Argument(..., help="arXiv ID or URL"),
+    provider: str = typer.Option(
+        "deepseek",
+        "--provider",
+        help="Translation provider. v1 only supports deepseek.",
+    ),
+    compile_pdf: bool = typer.Option(
+        False,
+        "--compile",
+        help="Compile translated LaTeX to PDF with latexmk/XeLaTeX.",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        help="Exact output directory. Defaults to ./output/<arxiv_id>/",
+    ),
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        help="Optional config YAML path.",
+    ),
+    max_chunks: Optional[int] = typer.Option(
+        None,
+        "--max-chunks",
+        help="Translate only the first N chunks for quick testing.",
+    ),
+    concurrency: int = typer.Option(
+        3,
+        "--concurrency",
+        help="Max concurrent DeepSeek requests.",
+    ),
+    model: str = typer.Option(
+        "deepseek-chat",
+        "--model",
+        help="DeepSeek model name, e.g. deepseek-chat or deepseek-reasoner.",
+    ),
+    font_dir: Optional[Path] = typer.Option(
+        None,
+        "--font-dir",
+        help="Directory containing local .ttf/.ttc/.otf fonts.",
+    ),
+    cjk_main_font: Optional[str] = typer.Option(
+        None,
+        "--cjk-main-font",
+        help="CJK main/serif font family name.",
+    ),
+    cjk_sans_font: Optional[str] = typer.Option(
+        None,
+        "--cjk-sans-font",
+        help="CJK sans font family name.",
+    ),
+    cjk_mono_font: Optional[str] = typer.Option(
+        None,
+        "--cjk-mono-font",
+        help="CJK mono font family name.",
+    ),
+    font_auto: Optional[bool] = typer.Option(
+        None,
+        "--font-auto/--no-font-auto",
+        help="Auto-detect CJK fonts from --font-dir/project fonts/system fonts.",
+    ),
+) -> None:
+    default_output = Path("output") / arxiv_id.replace("/", "_")
+    try:
+        options = _resolve_arxiv_zh_options(
+            provider=provider,
+            output=output or default_output,
+            config=config,
+            concurrency=concurrency,
+            model=model,
+            font_dir=font_dir,
+            cjk_main_font=cjk_main_font,
+            cjk_sans_font=cjk_sans_font,
+            cjk_mono_font=cjk_mono_font,
+            font_auto=font_auto,
+        )
+        _run_arxiv_zh_pipeline(
+            arxiv_id=arxiv_id,
+            options=options,
+            compile_pdf=compile_pdf,
+            max_chunks=max_chunks,
+        )
+    except ValueError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1)
+    except Exception as exc:
+        console.print(f"[bold red]arxiv-zh failed:[/bold red] {exc}")
+        raise typer.Exit(code=1)
+
+
 @config_app.command("show")
 def config_show():
     """Show current configuration."""
@@ -957,6 +1519,10 @@ def cache_clear(
 
 def main():
     app()
+
+
+def zh_main():
+    zh_app()
 
 
 if __name__ == "__main__":

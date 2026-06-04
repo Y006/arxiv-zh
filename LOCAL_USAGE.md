@@ -1,6 +1,6 @@
 # arxiv-zh 本地使用说明
 
-`arxiv-zh` 是基于 `zcyisiee/arxiv-translate` 的本地自用入口。第一版只支持 DeepSeek，复用上游下载、LaTeX 解析、占位符保护、翻译缓存、断点续跑、重组和验证流程。
+`arxiv-zh` 是 `Y006/arxiv-zh` 仓库的主入口。第一版只支持 DeepSeek，复用上游下载、LaTeX 解析、占位符保护、翻译缓存、断点续跑、重组和验证流程，并把本地字体和稳定输出目录作为默认能力。
 
 ## 准备仓库
 
@@ -8,12 +8,9 @@
 mkdir -p ~/Developer/arxiv-zh-work
 cd ~/Developer/arxiv-zh-work
 
-git clone https://github.com/zcyisiee/arxiv-translate.git
-git clone https://gist.github.com/58821d077b4b54d80c20daaf970fb133.git gist-git-guide
-git clone https://gist.github.com/de1348f3e212e61f87fd2cf47306b0ca.git gist-latexmk-makefile
-
-cd arxiv-translate
-git checkout -b local-deepseek-v1
+git clone https://github.com/Y006/arxiv-zh.git
+cd arxiv-zh
+git checkout main
 ```
 
 ## 创建环境

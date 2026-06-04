@@ -1,34 +1,59 @@
-# arxiv-translate - arXiv 论文翻译工具
+# arxiv-zh - DeepSeek arXiv 中文翻译工具
 
-将英文 arXiv LaTeX 论文翻译为中文，尽量保留数学公式、引用与文档结构。
+`arxiv-zh` 是面向本地自用的 arXiv LaTeX 论文中文翻译工具。它以 DeepSeek 为默认翻译入口，保留上游 `arxiv-translate` 的下载、解析、缓存、断点续跑、重组和编译能力，并新增稳定输出目录、本地字体目录和 CLI 字体控制。
 
 ## Quick Start
 
 ```bash
-pip install arxiv-translate
+git clone https://github.com/Y006/arxiv-zh.git
+cd arxiv-zh
 
-# 翻译 arXiv 论文
-arx translate https://arxiv.org/abs/2301.07041 --output-dir output/
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+export DEEPSEEK_API_KEY=你的_key
+python scripts/check_env.py
+
+arxiv-zh 2605.28486 \
+  --provider deepseek \
+  --model deepseek-chat \
+  --compile \
+  --max-chunks 2 \
+  --output ./output/mag-vla-font-test \
+  --font-dir ./fonts \
+  --cjk-main-font STSong \
+  --cjk-sans-font STXihei \
+  --cjk-mono-font STKaiti
 ```
 
-也可使用等价命令：
+输出目录：
 
-```bash
-arxiv-translate translate https://arxiv.org/abs/2301.07041 --output-dir output/
+```text
+output/<paper>/
+├── source/
+├── translated/main_zh.tex
+├── pdf/main_zh.pdf
+├── cache/
+├── logs/translate.log
+├── logs/compile.log
+└── translation_report.md
 ```
 
-## 从源码安装（开发）
+## 核心入口
 
-```bash
-git clone https://github.com/zcyisiee/arxiv-translate.git
-cd arxiv-translate
-pip install -e ".[dev]"
-```
+- 主命令：`arxiv-zh`
+- 默认模型：`deepseek-chat`
+- 可选模型：`--model deepseek-reasoner`
+- 默认本地字体目录：`./fonts`
+- 旧命令 `arx` / `arxiv-translate` 仍保留，用于兼容上游工作流。
+
+更多本地使用说明见 [LOCAL_USAGE.md](LOCAL_USAGE.md)。
 
 ## 从 ieeA 迁移
 
-- 安装命令迁移：`pip install ieeA` -> `pip install arxiv-translate`
-- 命令行迁移：`ieeA ...` -> `arx ...` 或 `arxiv-translate ...`
+- 安装方式迁移：从本仓库源码安装 `arxiv-zh`
+- 命令行迁移：`ieeA ...` -> `arxiv-zh ...`；`arx` / `arxiv-translate` 仅作为兼容入口保留
 - 配置目录迁移：
   - 新目录：`~/.config/arxiv-translate/`
   - 旧目录：`~/.ieeA/`

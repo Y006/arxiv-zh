@@ -4,10 +4,10 @@
 
 ## 分支
 
-当前自用开发分支固定为：
+当前主开发分支固定为：
 
 ```bash
-local-deepseek-v1
+main
 ```
 
 开始开发前确认：
@@ -19,7 +19,7 @@ git branch --show-current
 如果不在该分支：
 
 ```bash
-git checkout local-deepseek-v1
+git checkout main
 ```
 
 ## 提交
@@ -59,6 +59,6 @@ git tag v1-local-ready
 如需推送到个人远端：
 
 ```bash
-git push origin local-deepseek-v1
+git push origin main
 git push origin v1-local-ready
 ```

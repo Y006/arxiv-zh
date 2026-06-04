@@ -3,16 +3,16 @@ requires = ["setuptools>=64", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "arxiv-translate"
+name = "arxiv-zh"
 dynamic = ["version"]
-description = "arXiv 论文翻译工具 - 将英文 LaTeX 论文翻译成中文，保留数学公式和文档结构"
+description = "DeepSeek-powered arXiv Chinese translation CLI with local font support"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "GPL-3.0-or-later"}
 authors = [
-  {name = "arxiv-translate Team"},
+  {name = "arxiv-zh Maintainers"},
 ]
-keywords = ["arxiv", "latex", "translation", "chinese", "llm", "academic", "paper"]
+keywords = ["arxiv", "latex", "translation", "chinese", "deepseek", "llm", "academic", "paper"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Science/Research",
@@ -45,8 +45,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/zcyisiee/arxiv-translate"
-Repository = "https://github.com/zcyisiee/arxiv-translate"
+Homepage = "https://github.com/Y006/arxiv-zh"
+Repository = "https://github.com/Y006/arxiv-zh"
 
 [project.scripts]
 arx = "arxiv_translate.cli:main"

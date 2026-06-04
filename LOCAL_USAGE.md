@@ -29,11 +29,25 @@ pip install -e .
 
 ## 设置 DeepSeek API Key
 
+推荐使用项目根目录 `.env`：
+
+```bash
+cp .env.example .env
+```
+
+然后编辑 `.env`：
+
+```bash
+DEEPSEEK_API_KEY=你的_key
+```
+
+也可以继续使用 shell 环境变量：
+
 ```bash
 export DEEPSEEK_API_KEY=你的_key
 ```
 
-不要把 API key 写进仓库文件、配置样例或日志。
+系统环境变量优先级高于 `.env`。不要把 API key 写进仓库文件、配置样例或日志；真实 `.env` 已被 `.gitignore` 忽略。
 
 ## 检查环境
 
@@ -44,6 +58,7 @@ python scripts/check_env.py
 重点确认：
 
 - `DEEPSEEK_API_KEY` 存在。
+- `DEEPSEEK_API_KEY source` 显示 `environment` 或 `.env`。
 - `xelatex` 可用。
 - 优先有 `latexmk`；没有时会回退到多轮 `xelatex`。
 - TinyTeX 常见路径存在：

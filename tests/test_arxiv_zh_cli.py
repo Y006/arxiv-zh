@@ -65,6 +65,42 @@ def test_arxiv_zh_options_require_deepseek_key(monkeypatch, tmp_path: Path):
         )
 
 
+def test_arxiv_zh_options_load_deepseek_key_from_dotenv(monkeypatch, tmp_path: Path):
+    import arxiv_translate.cli as cli_module
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text("DEEPSEEK_API_KEY=sk-dotenv-test\n", encoding="utf-8")
+    monkeypatch.setattr(cli_module, "_project_root", lambda: tmp_path)
+
+    options = cli_module._resolve_arxiv_zh_options(
+        provider="deepseek",
+        output=tmp_path / "paper",
+        config=None,
+        concurrency=3,
+    )
+
+    assert options.api_key == "sk-dotenv-test"
+
+
+def test_arxiv_zh_options_prefers_shell_env_over_dotenv(monkeypatch, tmp_path: Path):
+    import arxiv_translate.cli as cli_module
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-shell-test")
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text("DEEPSEEK_API_KEY=sk-dotenv-test\n", encoding="utf-8")
+    monkeypatch.setattr(cli_module, "_project_root", lambda: tmp_path)
+
+    options = cli_module._resolve_arxiv_zh_options(
+        provider="deepseek",
+        output=tmp_path / "paper",
+        config=None,
+        concurrency=3,
+    )
+
+    assert options.api_key == "sk-shell-test"
+
+
 def test_arxiv_zh_options_store_cli_font_overrides(monkeypatch, tmp_path: Path):
     from arxiv_translate.cli import _resolve_arxiv_zh_options
 

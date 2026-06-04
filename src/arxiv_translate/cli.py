@@ -1,6 +1,5 @@
 import asyncio
 import importlib.metadata as metadata
-import os
 import shutil
 import time
 from dataclasses import dataclass
@@ -30,6 +29,7 @@ from arxiv_translate.compiler.chinese_support import (
 from arxiv_translate.downloader.arxiv import ArxivDownloader
 from arxiv_translate.parser.latex_parser import LaTeXParser
 from arxiv_translate.rules.config import Config, deep_merge, load_config, load_defaults
+from arxiv_translate.rules.env import get_env_value
 from arxiv_translate.rules.glossary import load_glossary
 from arxiv_translate.rules.examples import load_examples
 from arxiv_translate.rules.user_paths import (
@@ -132,6 +132,14 @@ def _project_font_dir() -> Path:
     return _project_root() / "fonts"
 
 
+def _arxiv_zh_dotenv_paths() -> list[Path]:
+    paths = [_project_root() / ".env"]
+    cwd_env = Path.cwd().resolve() / ".env"
+    if cwd_env not in paths:
+        paths.append(cwd_env)
+    return paths
+
+
 def _resolve_arxiv_zh_options(
     *,
     provider: str,
@@ -147,10 +155,14 @@ def _resolve_arxiv_zh_options(
 ) -> ArxivZhOptions:
     if provider != "deepseek":
         raise ValueError("arxiv-zh only supports --provider deepseek in v1.")
-    api_key = os.getenv("DEEPSEEK_API_KEY")
+    api_key = get_env_value(
+        "DEEPSEEK_API_KEY",
+        dotenv_files=_arxiv_zh_dotenv_paths(),
+    )
     if not api_key:
         raise ValueError(
-            "DEEPSEEK_API_KEY is required. Export it before running arxiv-zh."
+            "DEEPSEEK_API_KEY is required. Export it or put it in .env before "
+            "running arxiv-zh."
         )
     if concurrency < 1:
         raise ValueError("--concurrency must be at least 1.")

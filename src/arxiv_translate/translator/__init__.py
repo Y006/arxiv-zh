@@ -1,4 +1,3 @@
-import os
 from typing import Optional, Any
 from urllib.parse import urlsplit, urlunsplit
 from .llm_base import LLMProvider
@@ -9,6 +8,7 @@ from .anthropic_coding_provider import AnthropicCodingProvider
 from .http_provider import DirectHTTPProvider
 from .ark_provider import ArkProvider
 from .deepseek_provider import DeepSeekProvider
+from arxiv_translate.rules.env import get_env_value
 
 DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
@@ -115,7 +115,7 @@ def get_sdk_client(
     elif sdk == "deepseek":
         return DeepSeekProvider(
             model=model or DEEPSEEK_DEFAULT_MODEL,
-            api_key=key or os.getenv("DEEPSEEK_API_KEY"),
+            api_key=key or get_env_value("DEEPSEEK_API_KEY"),
             base_url=endpoint or DEEPSEEK_DEFAULT_BASE_URL,
             **kwargs,
         )

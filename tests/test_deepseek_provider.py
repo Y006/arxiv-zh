@@ -13,6 +13,22 @@ def test_deepseek_provider_uses_env_key_and_defaults(monkeypatch):
     assert provider.base_url == "https://api.deepseek.com"
 
 
+def test_deepseek_provider_uses_dotenv_key(monkeypatch, tmp_path):
+    import arxiv_translate.translator.deepseek_provider as provider_mod
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text(
+        'export DEEPSEEK_API_KEY="sk-dotenv-test"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(provider_mod, "_project_root", lambda: tmp_path)
+
+    provider = provider_mod.DeepSeekProvider()
+
+    assert provider.api_key == "sk-dotenv-test"
+
+
 def test_deepseek_provider_requires_env_key(monkeypatch):
     from arxiv_translate.translator.deepseek_provider import DeepSeekProvider
 

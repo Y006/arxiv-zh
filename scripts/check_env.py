@@ -54,6 +54,21 @@ def detect_recommended_fonts(font_dir: Path) -> dict[str, str]:
         return {"main": "unknown", "sans": "unknown", "mono": "unknown"}
 
 
+def deepseek_key_source() -> str:
+    try:
+        from arxiv_translate.rules.env import get_env_value, parse_dotenv_file
+
+        if os.getenv("DEEPSEEK_API_KEY"):
+            return "environment"
+        if parse_dotenv_file(PROJECT_ROOT / ".env").get("DEEPSEEK_API_KEY"):
+            return f".env ({PROJECT_ROOT / '.env'})"
+        if get_env_value("DEEPSEEK_API_KEY"):
+            return ".env"
+    except Exception:
+        pass
+    return "not found"
+
+
 def main() -> int:
     config_path = Path("~/.config/arxiv-translate/config.yaml").expanduser()
     in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
@@ -68,7 +83,9 @@ def main() -> int:
     print(f"Python: {sys.version.split()[0]} ({sys.executable})")
     print(f"Virtual environment: {status(in_venv)}")
     print(f"sys.prefix: {sys.prefix}")
-    print(f"DEEPSEEK_API_KEY present: {status(bool(os.getenv('DEEPSEEK_API_KEY')))}")
+    key_source = deepseek_key_source()
+    print(f"DEEPSEEK_API_KEY present: {status(key_source != 'not found')}")
+    print(f"DEEPSEEK_API_KEY source: {key_source}")
     print(f"xelatex: {which('xelatex')}")
     print(f"latexmk: {which('latexmk')}")
     print(f"tlmgr: {which('tlmgr')}")
@@ -90,7 +107,7 @@ def main() -> int:
         print(f"- {path}: {status(path.exists())}")
     print("")
     print("Recommended next commands:")
-    print("1. export DEEPSEEK_API_KEY=你的_key")
+    print("1. cp .env.example .env  # then edit DEEPSEEK_API_KEY")
     print(
         "2. arxiv-zh 2605.28486 --provider deepseek --compile "
         "--max-chunks 2 --output ./output/mag-vla-font-test "

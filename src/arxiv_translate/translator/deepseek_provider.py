@@ -1,7 +1,21 @@
-import os
+from pathlib import Path
 from typing import Optional
 
+from arxiv_translate.rules.env import get_env_value
+
 from .openai_provider import OpenAIProvider
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _deepseek_dotenv_paths() -> list[Path]:
+    paths = [_project_root() / ".env"]
+    cwd_env = Path.cwd().resolve() / ".env"
+    if cwd_env not in paths:
+        paths.append(cwd_env)
+    return paths
 
 
 class DeepSeekProvider(OpenAIProvider):
@@ -19,11 +33,14 @@ class DeepSeekProvider(OpenAIProvider):
         api_key_env: str = DEFAULT_API_KEY_ENV,
         **kwargs,
     ):
-        resolved_key = api_key or os.getenv(api_key_env)
+        resolved_key = api_key or get_env_value(
+            api_key_env,
+            dotenv_files=_deepseek_dotenv_paths(),
+        )
         if not resolved_key:
             raise ValueError(
                 f"{api_key_env} is required for DeepSeekProvider. "
-                f"Set it in the environment before running arxiv-zh."
+                f"Export it or put it in .env before running arxiv-zh."
             )
 
         self.base_url = (base_url or self.DEFAULT_BASE_URL).rstrip("/")

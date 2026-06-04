@@ -12,7 +12,8 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e .
 
-export DEEPSEEK_API_KEY=你的_key
+cp .env.example .env
+# 编辑 .env，填入 DEEPSEEK_API_KEY
 python scripts/check_env.py
 
 arxiv-zh 2605.28486 \
@@ -46,6 +47,7 @@ output/<paper>/
 - 默认模型：`deepseek-chat`
 - 可选模型：`--model deepseek-reasoner`
 - 默认本地字体目录：`./fonts`
+- DeepSeek 密钥：支持 shell 环境变量或项目根目录 `.env`，shell 环境变量优先
 - 旧命令 `arx` / `arxiv-translate` 仍保留，用于兼容上游工作流。
 
 更多本地使用说明见 [LOCAL_USAGE.md](LOCAL_USAGE.md)。

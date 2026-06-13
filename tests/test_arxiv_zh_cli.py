@@ -1,21 +1,15 @@
 from pathlib import Path
+from textwrap import dedent
 
 import pytest
+import yaml
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 
-def test_arxiv_zh_entry_rejects_non_deepseek_provider():
-    from arxiv_translate.cli import zh_app
-
-    runner = CliRunner()
-
-    result = runner.invoke(
-        zh_app,
-        ["2501.12345", "--provider", "openai", "--output", "out"],
-    )
-
-    assert result.exit_code == 1
-    assert "only supports --provider deepseek" in result.stdout
+def _write_config(path: Path, content: str) -> Path:
+    path.write_text(dedent(content).strip() + "\n", encoding="utf-8")
+    return path
 
 
 def test_prepare_arxiv_zh_output_dirs_creates_expected_layout(tmp_path: Path):
@@ -51,34 +45,46 @@ def test_prepare_arxiv_zh_output_dirs_resolves_relative_output(tmp_path: Path, m
     assert layout.cache_dir == tmp_path / "paper" / "cache"
 
 
-def test_arxiv_zh_options_require_deepseek_key(monkeypatch, tmp_path: Path):
+def test_arxiv_zh_options_require_configured_key_env(monkeypatch, tmp_path: Path):
     import arxiv_translate.cli as cli_module
 
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        llm:
+          key_env: CUSTOM_DEEPSEEK_KEY
+        fonts:
+          auto_detect: false
+        """,
+    )
+    monkeypatch.delenv("CUSTOM_DEEPSEEK_KEY", raising=False)
     monkeypatch.setattr(cli_module, "_arxiv_zh_dotenv_paths", lambda: [])
 
-    with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
+    with pytest.raises(ValueError, match="CUSTOM_DEEPSEEK_KEY"):
         cli_module._resolve_arxiv_zh_options(
-            provider="deepseek",
-            output=tmp_path / "paper",
-            config=None,
-            concurrency=3,
+            arxiv_id="2501.12345",
+            config=config_path,
         )
 
 
-def test_arxiv_zh_options_load_deepseek_key_from_dotenv(monkeypatch, tmp_path: Path):
+def test_arxiv_zh_options_load_key_from_dotenv(monkeypatch, tmp_path: Path):
     import arxiv_translate.cli as cli_module
 
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        fonts:
+          auto_detect: false
+        """,
+    )
     dotenv_path = tmp_path / ".env"
     dotenv_path.write_text("DEEPSEEK_API_KEY=sk-dotenv-test\n", encoding="utf-8")
-    monkeypatch.setattr(cli_module, "_project_root", lambda: tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(cli_module, "_arxiv_zh_dotenv_paths", lambda: [dotenv_path])
 
-    options = cli_module._resolve_arxiv_zh_options(
-        provider="deepseek",
-        output=tmp_path / "paper",
-        config=None,
-        concurrency=3,
+    options, _config = cli_module._resolve_arxiv_zh_options(
+        arxiv_id="2501.12345",
+        config=config_path,
     )
 
     assert options.api_key == "sk-dotenv-test"
@@ -87,65 +93,95 @@ def test_arxiv_zh_options_load_deepseek_key_from_dotenv(monkeypatch, tmp_path: P
 def test_arxiv_zh_options_prefers_shell_env_over_dotenv(monkeypatch, tmp_path: Path):
     import arxiv_translate.cli as cli_module
 
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-shell-test")
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        fonts:
+          auto_detect: false
+        """,
+    )
     dotenv_path = tmp_path / ".env"
     dotenv_path.write_text("DEEPSEEK_API_KEY=sk-dotenv-test\n", encoding="utf-8")
-    monkeypatch.setattr(cli_module, "_project_root", lambda: tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-shell-test")
+    monkeypatch.setattr(cli_module, "_arxiv_zh_dotenv_paths", lambda: [dotenv_path])
 
-    options = cli_module._resolve_arxiv_zh_options(
-        provider="deepseek",
-        output=tmp_path / "paper",
-        config=None,
-        concurrency=3,
+    options, _config = cli_module._resolve_arxiv_zh_options(
+        arxiv_id="2501.12345",
+        config=config_path,
     )
 
     assert options.api_key == "sk-shell-test"
 
 
-def test_arxiv_zh_options_store_cli_font_overrides(monkeypatch, tmp_path: Path):
-    from arxiv_translate.cli import _resolve_arxiv_zh_options
-
-    font_dir = tmp_path / "fonts"
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-
-    options = _resolve_arxiv_zh_options(
-        provider="deepseek",
-        output=tmp_path / "paper",
-        config=None,
-        concurrency=3,
-        font_dir=font_dir,
-        cjk_main_font="STSong",
-        cjk_sans_font="STXihei",
-        cjk_mono_font="STKaiti",
-        font_auto=False,
-    )
-
-    assert options.font_dir == font_dir
-    assert options.cjk_main_font == "STSong"
-    assert options.cjk_sans_font == "STXihei"
-    assert options.cjk_mono_font == "STKaiti"
-    assert options.font_auto is False
-
-
-def test_arxiv_zh_options_store_cli_model_override(monkeypatch, tmp_path: Path):
-    from arxiv_translate.cli import _resolve_arxiv_zh_options
-
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-
-    options = _resolve_arxiv_zh_options(
-        provider="deepseek",
-        output=tmp_path / "paper",
-        config=None,
-        concurrency=3,
-        model="deepseek-reasoner",
-    )
-
-    assert options.model == "deepseek-reasoner"
-
-
-def test_arxiv_zh_default_config_uses_detected_cjk_fonts(monkeypatch):
+def test_arxiv_zh_options_come_from_single_config(monkeypatch, tmp_path: Path):
     import arxiv_translate.cli as cli_module
 
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        llm:
+          models: deepseek-reasoner
+          endpoint: https://api.deepseek.com
+        translation:
+          concurrency: 5
+          max_chunks: 2
+        paths:
+          output_dir: ./translated-output
+        fonts:
+          dir: ./fonts
+          auto_detect: false
+          main: STSong
+          sans: STXihei
+          mono: STKaiti
+        compilation:
+          enabled: true
+        """,
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+
+    options, config = cli_module._resolve_arxiv_zh_options(
+        arxiv_id="2501.12345",
+        config=config_path,
+    )
+
+    assert options.output == tmp_path / "translated-output" / "2501.12345"
+    assert options.concurrency == 5
+    assert options.max_chunks == 2
+    assert options.compile_pdf is True
+    assert options.model == "deepseek-reasoner"
+    assert config.fonts.dir == str(fonts_dir)
+    assert config.fonts.main == "STSong"
+    assert config.fonts.sans == "STXihei"
+    assert config.fonts.mono == "STKaiti"
+
+
+def test_arxiv_zh_rejects_non_deepseek_config(monkeypatch, tmp_path: Path):
+    import arxiv_translate.cli as cli_module
+
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        llm:
+          sdk: openai
+        fonts:
+          auto_detect: false
+        """,
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+
+    with pytest.raises(ValueError, match="llm.sdk: deepseek"):
+        cli_module._resolve_arxiv_zh_options(
+            arxiv_id="2501.12345",
+            config=config_path,
+        )
+
+
+def test_arxiv_zh_default_config_uses_detected_cjk_fonts(monkeypatch, tmp_path: Path):
+    import arxiv_translate.cli as cli_module
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setattr(
         cli_module,
         "get_available_fonts",
@@ -167,6 +203,7 @@ def test_arxiv_zh_default_config_uses_detected_cjk_fonts(monkeypatch):
 def test_arxiv_zh_default_config_prefers_project_fonts(monkeypatch, tmp_path: Path):
     import arxiv_translate.cli as cli_module
 
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     project_fonts = tmp_path / "fonts"
     project_fonts.mkdir()
     monkeypatch.setattr(cli_module, "_project_font_dir", lambda: project_fonts)
@@ -188,23 +225,73 @@ def test_arxiv_zh_default_config_prefers_project_fonts(monkeypatch, tmp_path: Pa
     assert config.fonts.mono == "STKaiti"
 
 
-def test_arxiv_zh_cli_font_overrides_apply_to_config(tmp_path: Path):
+def test_arxiv_zh_config_font_values_are_used(tmp_path: Path):
     from arxiv_translate.cli import _load_config_for_arxiv_zh
 
     font_dir = tmp_path / "fonts"
     font_dir.mkdir()
-
-    config = _load_config_for_arxiv_zh(
-        None,
-        font_dir=font_dir,
-        cjk_main_font="STSong",
-        cjk_sans_font="STXihei",
-        cjk_mono_font="STKaiti",
-        font_auto=False,
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        fonts:
+          dir: ./fonts
+          auto_detect: false
+          main: STSong
+          sans: STXihei
+          mono: STKaiti
+        """,
     )
+
+    config = _load_config_for_arxiv_zh(config_path)
 
     assert config.fonts.dir == str(font_dir)
     assert config.fonts.auto_detect is False
     assert config.fonts.main == "STSong"
     assert config.fonts.sans == "STXihei"
     assert config.fonts.mono == "STKaiti"
+
+
+def test_config_example_matches_runtime_schema():
+    from arxiv_translate.rules.config import Config
+
+    data = yaml.safe_load(Path("config.example.yaml").read_text(encoding="utf-8"))
+
+    config = Config(**data)
+
+    assert config.llm.sdk == "deepseek"
+    assert config.llm.key is None
+    assert config.llm.key_env == "DEEPSEEK_API_KEY"
+
+
+def test_config_rejects_unknown_top_level_sections():
+    from arxiv_translate.rules.config import Config
+
+    with pytest.raises(ValidationError, match="provider"):
+        Config(provider={"name": "deepseek"})
+
+
+def test_config_set_writes_valid_schema_key(monkeypatch, tmp_path: Path):
+    from arxiv_translate.cli import app
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["config", "set", "llm.models", "deepseek-reasoner"])
+
+    assert result.exit_code == 0
+    config_path = tmp_path / "xdg" / "arxiv-translate" / "config.yaml"
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert data["llm"]["models"] == "deepseek-reasoner"
+
+
+def test_config_set_rejects_unknown_schema_key(monkeypatch, tmp_path: Path):
+    from arxiv_translate.cli import app
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["config", "set", "provider.name", "deepseek"])
+
+    assert result.exit_code == 1
+    assert "Invalid config value" in result.stdout
+    assert not (tmp_path / "xdg" / "arxiv-translate" / "config.yaml").exists()

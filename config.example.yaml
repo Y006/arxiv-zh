@@ -1,30 +1,55 @@
-provider:
-  name: deepseek
-  type: openai_compatible
-  base_url: https://api.deepseek.com
-  model: deepseek-chat
-  api_key_env: DEEPSEEK_API_KEY
-
-translation:
+llm:
+  sdk: deepseek
+  models: deepseek-chat
+  endpoint: https://api.deepseek.com
+  key: null
+  key_env: DEEPSEEK_API_KEY
   temperature: 0.1
   max_tokens: 4000
-  timeout: 120
-  retries: 3
+
+translation:
   concurrency: 3
+  max_chunks: null
+  quality_mode: standard
+  examples_path: null
+  batch_short_threshold: 300
+  batch_max_chars: 2000
+  custom_system_prompt: null
+  custom_user_prompt: null
+  preserve_terms: []
+
+paths:
+  output_dir: ./output
+  cache_dir: .cache
 
 fonts:
   dir: ./fonts
   auto_detect: true
-  main: STSong
-  sans: STXihei
-  mono: STKaiti
+  main: null
+  sans: null
+  mono: null
 
-compile:
+compilation:
+  enabled: true
   engine: xelatex
-  prefer_latexmk: true
-  tinytex_paths:
-    - ~/Library/TinyTeX/bin/universal-darwin/
-    - /Library/TeX/texbin/
+  timeout: 120
+  clean_aux: true
+  engine_policy: auto
+  fallback_engines:
+    - xelatex
+    - lualatex
+  allow_pdflatex_cjk: false
+  allow_shell_escape: false
+  max_repair_rounds: 3
+  chinese_package: auto
 
-output:
-  root: ./output
+parser:
+  extra_protected_environments: []
+  extra_translatable_environments: []
+
+cache:
+  enabled: true
+  max_size_mb: 2048
+  ttl_days: 30
+  compression: zstd
+  key_mode: relaxed_chunk

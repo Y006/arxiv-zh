@@ -1,15 +1,20 @@
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from arxiv_translate.rules.user_paths import resolve_user_file
 
 
-class LLMConfig(BaseModel):
-    sdk: Optional[str] = "openai"
-    models: Union[str, List[str]] = "gpt-4o-mini"
+class StrictConfigModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class LLMConfig(StrictConfigModel):
+    sdk: Optional[str] = "deepseek"
+    models: Union[str, List[str]] = "deepseek-chat"
     key: Optional[str] = None
+    key_env: Optional[str] = "DEEPSEEK_API_KEY"
     endpoint: Optional[str] = None
     temperature: float = 0.1
     max_tokens: int = 4000
@@ -19,16 +24,16 @@ class LLMConfig(BaseModel):
     def validate_sdk(cls, v):
         if v is not None and v not in (
             "openai",
-                "openai-coding",
-                "anthropic",
-                "anthropic-coding",
-                "bailian",
-                "deepseek",
-            ):
-                raise ValueError(
-                    "sdk must be 'openai', 'openai-coding', 'anthropic', "
-                    f"'anthropic-coding', 'bailian', 'deepseek', or None, got '{v}'"
-                )
+            "openai-coding",
+            "anthropic",
+            "anthropic-coding",
+            "bailian",
+            "deepseek",
+        ):
+            raise ValueError(
+                "sdk must be 'openai', 'openai-coding', 'anthropic', "
+                f"'anthropic-coding', 'bailian', 'deepseek', or None, got '{v}'"
+            )
         return v
 
     @field_validator("models")
@@ -40,13 +45,21 @@ class LLMConfig(BaseModel):
             raise ValueError("models list cannot be empty")
         return v
 
+    @field_validator("key_env")
+    @classmethod
+    def validate_key_env(cls, v):
+        if v is not None and not v.strip():
+            raise ValueError("key_env cannot be empty")
+        return v
+
     def get_model(self) -> str:
         if isinstance(self.models, list):
             return self.models[0]
         return self.models
 
 
-class CompilationConfig(BaseModel):
+class CompilationConfig(StrictConfigModel):
+    enabled: bool = False
     engine: str = "xelatex"
     timeout: int = 120
     clean_aux: bool = True
@@ -96,12 +109,12 @@ class CompilationConfig(BaseModel):
         return v
 
 
-class PathsConfig(BaseModel):
+class PathsConfig(StrictConfigModel):
     output_dir: str = "output"
     cache_dir: str = ".cache"
 
 
-class FontConfig(BaseModel):
+class FontConfig(StrictConfigModel):
     """CJK font configuration."""
 
     main: Optional[str] = None
@@ -111,7 +124,7 @@ class FontConfig(BaseModel):
     auto_detect: bool = True
 
 
-class TranslationConfig(BaseModel):
+class TranslationConfig(StrictConfigModel):
     custom_system_prompt: Optional[str] = None
     custom_user_prompt: Optional[str] = None
     preserve_terms: List[str] = Field(default_factory=list)
@@ -119,16 +132,32 @@ class TranslationConfig(BaseModel):
     examples_path: Optional[str] = None
     batch_short_threshold: int = 300
     batch_max_chars: int = 2000
+    concurrency: int = 3
+    max_chunks: Optional[int] = None
+
+    @field_validator("concurrency")
+    @classmethod
+    def validate_concurrency(cls, v):
+        if v < 1:
+            raise ValueError("concurrency must be at least 1")
+        return v
+
+    @field_validator("max_chunks")
+    @classmethod
+    def validate_max_chunks(cls, v):
+        if v is not None and v < 1:
+            raise ValueError("max_chunks must be at least 1 when provided")
+        return v
 
 
-class ParserConfig(BaseModel):
+class ParserConfig(StrictConfigModel):
     """LaTeX parser configuration."""
 
     extra_protected_environments: List[str] = Field(default_factory=list)
     extra_translatable_environments: List[str] = Field(default_factory=list)
 
 
-class CacheConfig(BaseModel):
+class CacheConfig(StrictConfigModel):
     enabled: bool = True
     max_size_mb: int = 2048
     ttl_days: int = 30
@@ -136,7 +165,7 @@ class CacheConfig(BaseModel):
     key_mode: str = "relaxed_chunk"
 
 
-class Config(BaseModel):
+class Config(StrictConfigModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     compilation: CompilationConfig = Field(default_factory=CompilationConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)

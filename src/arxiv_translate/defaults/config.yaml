@@ -1,15 +1,25 @@
 llm:
-  sdk: null
-  models: openai/gpt-5-mini
-  endpoint: https://openrouter.ai/api/v1/chat/completions
-  key: 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
+  sdk: deepseek
+  models: deepseek-chat
+  endpoint: https://api.deepseek.com
+  key: null
+  key_env: DEEPSEEK_API_KEY
   temperature: 0.1
   max_tokens: 4000
 
 compilation:
+  enabled: false
   engine: xelatex
   timeout: 120
   clean_aux: true
+  engine_policy: auto
+  fallback_engines:
+    - xelatex
+    - lualatex
+  allow_pdflatex_cjk: false
+  allow_shell_escape: false
+  max_repair_rounds: 3
+  chinese_package: auto
 
 paths:
   output_dir: output
@@ -23,14 +33,23 @@ cache:
   key_mode: relaxed_chunk
 
 fonts:
-  auto_detect: false
-  main: Source Han Serif SC
-  sans: Source Han Sans SC
-  mono: Source Han Mono SC
+  auto_detect: true
+  main: null
+  sans: null
+  mono: null
   dir: fonts
 
 translation:
+  custom_system_prompt: null
+  custom_user_prompt: null
+  preserve_terms: []
   quality_mode: standard
   examples_path: null
   batch_short_threshold: 300
   batch_max_chars: 2000
+  concurrency: 3
+  max_chunks: null
+
+parser:
+  extra_protected_environments: []
+  extra_translatable_environments: []

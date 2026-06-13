@@ -11,17 +11,9 @@ cd arxiv-zh
 uv sync
 cp .env.example .env
 # 编辑 .env，填入 DEEPSEEK_API_KEY
+cp config.example.yaml config.yaml
 
-uv run arxiv-zh 2501.12345 \
-  --provider deepseek \
-  --model deepseek-chat \
-  --compile \
-  --max-chunks 2 \
-  --output ./output/test-paper \
-  --font-dir ./fonts \
-  --cjk-main-font STSong \
-  --cjk-sans-font STXihei \
-  --cjk-mono-font STKaiti
+uv run arxiv-zh 2501.12345 --config config.yaml
 ```
 
 主入口是 `arxiv-zh`。`arx` 和 `arxiv-translate` 仍作为上游兼容入口保留。
@@ -42,13 +34,15 @@ output/<paper>/
 
 ## 配置
 
-DeepSeek 密钥支持 shell 环境变量或项目根目录 `.env`，shell 环境变量优先。
+生产入口 `arxiv-zh` 只需要论文 ID 和一个配置文件。模型、输出目录、是否编译、并发数、字体、缓存和编译策略都写在同一个 YAML 中。
+
+DeepSeek 密钥支持 shell 环境变量或项目根目录 `.env`，shell 环境变量优先。配置文件只保存环境变量名，不建议写入真实密钥。
 
 ```bash
 export DEEPSEEK_API_KEY=sk-...
 ```
 
-完整配置模板见 `config.example.yaml`。默认用户配置目录是 `~/.config/arxiv-translate/`。
+完整配置模板见 `config.example.yaml`。默认用户配置目录是 `~/.config/arxiv-translate/`；生产使用建议显式传 `--config config.yaml`。
 
 项目保留三枚默认 CJK 字体：
 
@@ -58,7 +52,7 @@ fonts/STXIHEI.TTF
 fonts/STKAITI.TTF
 ```
 
-如果不传 `--font-dir`，CLI 会优先扫描项目 `fonts/`，再回退到系统字体。
+如果配置里的 `fonts.auto_detect` 为 `true`，CLI 会优先扫描配置中的 `fonts.dir`，再回退到项目 `fonts/` 和系统字体。
 
 ## 核心流程
 

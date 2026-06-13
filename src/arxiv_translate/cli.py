@@ -77,18 +77,14 @@ class ArxivZhOutputLayout:
 
 @dataclass
 class ArxivZhOptions:
-    provider: str
     output: Path
     config: Optional[Path]
     concurrency: int
     api_key: str
-    font_dir: Optional[Path] = None
-    cjk_main_font: Optional[str] = None
-    cjk_sans_font: Optional[str] = None
-    cjk_mono_font: Optional[str] = None
-    font_auto: Optional[bool] = None
-    model: str = "deepseek-chat"
-    endpoint: str = "https://api.deepseek.com"
+    model: str
+    endpoint: str
+    compile_pdf: bool
+    max_chunks: Optional[int] = None
 
 
 def _append_text_log(path: Path, message: str) -> None:
@@ -137,56 +133,16 @@ def _arxiv_zh_dotenv_paths() -> list[Path]:
     return paths
 
 
-def _resolve_arxiv_zh_options(
-    *,
-    provider: str,
-    output: Path,
-    config: Optional[Path],
-    concurrency: int,
-    font_dir: Optional[Path] = None,
-    cjk_main_font: Optional[str] = None,
-    cjk_sans_font: Optional[str] = None,
-    cjk_mono_font: Optional[str] = None,
-    font_auto: Optional[bool] = None,
-    model: str = "deepseek-chat",
-) -> ArxivZhOptions:
-    if provider != "deepseek":
-        raise ValueError("arxiv-zh only supports --provider deepseek in v1.")
-    api_key = get_env_value(
-        "DEEPSEEK_API_KEY",
-        dotenv_files=_arxiv_zh_dotenv_paths(),
-    )
-    if not api_key:
-        raise ValueError(
-            "DEEPSEEK_API_KEY is required. Export it or put it in .env before "
-            "running arxiv-zh."
-        )
-    if concurrency < 1:
-        raise ValueError("--concurrency must be at least 1.")
-    return ArxivZhOptions(
-        provider=provider,
-        output=output,
-        config=config,
-        concurrency=concurrency,
-        api_key=api_key,
-        font_dir=font_dir,
-        cjk_main_font=cjk_main_font,
-        cjk_sans_font=cjk_sans_font,
-        cjk_mono_font=cjk_mono_font,
-        font_auto=font_auto,
-        model=model,
-    )
+def _resolve_path_from_config(path_value: str | Path, config_path: Optional[Path]) -> Path:
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    if config_path is not None:
+        return (config_path.expanduser().resolve().parent / path).resolve()
+    return (Path.cwd().resolve() / path).resolve()
 
 
-def _load_config_for_arxiv_zh(
-    config_path: Optional[Path],
-    *,
-    font_dir: Optional[Path] = None,
-    cjk_main_font: Optional[str] = None,
-    cjk_sans_font: Optional[str] = None,
-    cjk_mono_font: Optional[str] = None,
-    font_auto: Optional[bool] = None,
-) -> Config:
+def _load_config_for_arxiv_zh(config_path: Optional[Path]) -> Config:
     if config_path is None:
         config = load_config()
     else:
@@ -196,16 +152,19 @@ def _load_config_for_arxiv_zh(
             user_data = yaml.safe_load(config_file) or {}
         config = Config(**deep_merge(load_defaults(), user_data))
 
-    resolved_font_dir = Path(font_dir).expanduser().resolve() if font_dir else None
-    if resolved_font_dir is None:
-        configured_dir = getattr(config.fonts, "dir", None)
-        if configured_dir:
-            resolved_font_dir = Path(configured_dir).expanduser()
-            if not resolved_font_dir.is_absolute():
-                if config_path is None and resolved_font_dir == Path("fonts"):
-                    resolved_font_dir = _project_font_dir().resolve()
-                else:
-                    resolved_font_dir = (_project_root() / resolved_font_dir).resolve()
+    resolved_font_dir = None
+    configured_dir = getattr(config.fonts, "dir", None)
+    if configured_dir:
+        configured_path = Path(configured_dir).expanduser()
+        if (
+            config_path is None
+            and not configured_path.is_absolute()
+            and configured_path == Path("fonts")
+            and _project_font_dir().exists()
+        ):
+            resolved_font_dir = _project_font_dir().resolve()
+        else:
+            resolved_font_dir = _resolve_path_from_config(configured_path, config_path)
 
     project_font_dir = _project_font_dir()
     if resolved_font_dir is None and project_font_dir.exists():
@@ -214,9 +173,7 @@ def _load_config_for_arxiv_zh(
     if resolved_font_dir is not None:
         config.fonts.dir = str(resolved_font_dir)
 
-    if font_auto is not None:
-        config.fonts.auto_detect = font_auto
-    elif config_path is None:
+    if config_path is None:
         config.fonts.auto_detect = True
 
     if config.fonts.auto_detect:
@@ -225,14 +182,44 @@ def _load_config_for_arxiv_zh(
         config.fonts.sans = detected_fonts["sans"]
         config.fonts.mono = detected_fonts["mono"]
 
-    if cjk_main_font:
-        config.fonts.main = cjk_main_font
-    if cjk_sans_font:
-        config.fonts.sans = cjk_sans_font
-    if cjk_mono_font:
-        config.fonts.mono = cjk_mono_font
-
     return config
+
+
+def _resolve_arxiv_zh_options(
+    *,
+    arxiv_id: str,
+    config: Optional[Path],
+) -> tuple[ArxivZhOptions, Config]:
+    resolved_config = _load_config_for_arxiv_zh(config)
+
+    if resolved_config.llm.sdk != "deepseek":
+        raise ValueError("arxiv-zh only supports llm.sdk: deepseek in config.")
+
+    api_key_env = resolved_config.llm.key_env or "DEEPSEEK_API_KEY"
+    api_key = resolved_config.llm.key or get_env_value(
+        api_key_env,
+        dotenv_files=_arxiv_zh_dotenv_paths(),
+    )
+    if not api_key:
+        raise ValueError(
+            f"{api_key_env} is required. Export it, put it in .env, or set "
+            "llm.key in the config before running arxiv-zh."
+        )
+
+    output_root = _resolve_path_from_config(resolved_config.paths.output_dir, config)
+    output = output_root / arxiv_id.replace("/", "_")
+
+    options = ArxivZhOptions(
+        output=output,
+        config=config,
+        concurrency=resolved_config.translation.concurrency,
+        api_key=api_key,
+        model=resolved_config.llm.get_model(),
+        endpoint=resolved_config.llm.endpoint or "https://api.deepseek.com",
+        compile_pdf=resolved_config.compilation.enabled,
+        max_chunks=resolved_config.translation.max_chunks,
+    )
+    return options, resolved_config
 
 
 def _copy_source_tree_to_translated(source_dir: Path, translated_dir: Path) -> None:
@@ -937,15 +924,11 @@ def _run_arxiv_zh_pipeline(
     *,
     arxiv_id: str,
     options: ArxivZhOptions,
-    compile_pdf: bool,
-    max_chunks: Optional[int],
+    config: Config,
 ) -> None:
     layout = _prepare_arxiv_zh_output_dirs(options.output)
     layout.translate_log.write_text("", encoding="utf-8")
     _append_text_log(layout.translate_log, f"Starting arxiv-zh job for {arxiv_id}")
-
-    if max_chunks is not None and max_chunks < 1:
-        raise ValueError("--max-chunks must be at least 1 when provided.")
 
     async def run_pipeline() -> None:
         local_cache: Optional[LocalTranslationCache] = None
@@ -953,19 +936,8 @@ def _run_arxiv_zh_pipeline(
         translated_count = 0
         total_chunks = 0
         try:
-            config = _load_config_for_arxiv_zh(
-                options.config,
-                font_dir=options.font_dir,
-                cjk_main_font=options.cjk_main_font,
-                cjk_sans_font=options.cjk_sans_font,
-                cjk_mono_font=options.cjk_mono_font,
-                font_auto=options.font_auto,
-            )
-            config.llm.sdk = "deepseek"
-            config.llm.models = options.model
             config.llm.key = options.api_key
             config.llm.endpoint = options.endpoint
-            config.llm.temperature = 0.1
             config.paths.cache_dir = str(layout.cache_dir)
             config.cache.enabled = True
 
@@ -1033,8 +1005,8 @@ def _run_arxiv_zh_pipeline(
             )
 
             chunk_data = [{"chunk_id": c.id, "content": c.content} for c in doc.chunks]
-            if max_chunks is not None:
-                chunk_data = chunk_data[:max_chunks]
+            if options.max_chunks is not None:
+                chunk_data = chunk_data[: options.max_chunks]
             _append_text_log(
                 layout.translate_log,
                 f"Translating {len(chunk_data)} of {total_chunks} chunks",
@@ -1120,7 +1092,7 @@ def _run_arxiv_zh_pipeline(
             )
 
             pdf_path: Optional[Path] = None
-            if compile_pdf:
+            if options.compile_pdf:
                 _append_text_log(layout.translate_log, "Compiling PDF")
                 compiler = LaTeXCompiler(
                     timeout=config.compilation.timeout,
@@ -1197,86 +1169,21 @@ def _run_arxiv_zh_pipeline(
 @zh_app.command()
 def arxiv_zh_root(
     arxiv_id: str = typer.Argument(..., help="arXiv ID or URL"),
-    provider: str = typer.Option(
-        "deepseek",
-        "--provider",
-        help="Translation provider. v1 only supports deepseek.",
-    ),
-    compile_pdf: bool = typer.Option(
-        False,
-        "--compile",
-        help="Compile translated LaTeX to PDF with latexmk/XeLaTeX.",
-    ),
-    output: Optional[Path] = typer.Option(
-        None,
-        "--output",
-        help="Exact output directory. Defaults to ./output/<arxiv_id>/",
-    ),
     config: Optional[Path] = typer.Option(
         None,
         "--config",
-        help="Optional config YAML path.",
-    ),
-    max_chunks: Optional[int] = typer.Option(
-        None,
-        "--max-chunks",
-        help="Translate only the first N chunks for quick testing.",
-    ),
-    concurrency: int = typer.Option(
-        3,
-        "--concurrency",
-        help="Max concurrent DeepSeek requests.",
-    ),
-    model: str = typer.Option(
-        "deepseek-chat",
-        "--model",
-        help="DeepSeek model name, e.g. deepseek-chat or deepseek-reasoner.",
-    ),
-    font_dir: Optional[Path] = typer.Option(
-        None,
-        "--font-dir",
-        help="Directory containing local .ttf/.ttc/.otf fonts.",
-    ),
-    cjk_main_font: Optional[str] = typer.Option(
-        None,
-        "--cjk-main-font",
-        help="CJK main/serif font family name.",
-    ),
-    cjk_sans_font: Optional[str] = typer.Option(
-        None,
-        "--cjk-sans-font",
-        help="CJK sans font family name.",
-    ),
-    cjk_mono_font: Optional[str] = typer.Option(
-        None,
-        "--cjk-mono-font",
-        help="CJK mono font family name.",
-    ),
-    font_auto: Optional[bool] = typer.Option(
-        None,
-        "--font-auto/--no-font-auto",
-        help="Auto-detect CJK fonts from --font-dir/project fonts/system fonts.",
+        help="Config YAML path. Defaults are used when omitted.",
     ),
 ) -> None:
-    default_output = Path("output") / arxiv_id.replace("/", "_")
     try:
-        options = _resolve_arxiv_zh_options(
-            provider=provider,
-            output=output or default_output,
+        options, resolved_config = _resolve_arxiv_zh_options(
+            arxiv_id=arxiv_id,
             config=config,
-            concurrency=concurrency,
-            model=model,
-            font_dir=font_dir,
-            cjk_main_font=cjk_main_font,
-            cjk_sans_font=cjk_sans_font,
-            cjk_mono_font=cjk_mono_font,
-            font_auto=font_auto,
         )
         _run_arxiv_zh_pipeline(
             arxiv_id=arxiv_id,
             options=options,
-            compile_pdf=compile_pdf,
-            max_chunks=max_chunks,
+            config=resolved_config,
         )
     except ValueError as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
@@ -1297,7 +1204,7 @@ def config_show():
 def config_set(key: str, value: str):
     """
     Set a configuration value (dot-separated).
-    Example: arx config set llm.model gpt-4
+    Example: arx config set llm.models deepseek-chat
     """
     config_file = ensure_config_dir() / "config.yaml"
 
@@ -1334,6 +1241,12 @@ def config_set(key: str, value: str):
             pass
 
     current[keys[-1]] = val
+
+    try:
+        Config(**deep_merge(load_defaults(), data))
+    except Exception as exc:
+        console.print(f"[red]Invalid config value for {key}:[/red] {exc}")
+        raise typer.Exit(1)
 
     with open(config_file, "w", encoding="utf-8") as f:
         yaml.dump(data, f)

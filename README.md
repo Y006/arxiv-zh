@@ -21,7 +21,7 @@ uv run arxiv-zh 2501.12345 --config config.yaml
 ## 输出结构
 
 ```text
-output/<paper>/
+output/arxiv-<arxiv_id>/
 ├── source/
 ├── translated/main_zh.tex
 ├── pdf/main_zh.pdf

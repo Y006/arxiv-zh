@@ -34,7 +34,8 @@ class ArxivDownloader:
             time.sleep(3 - elapsed)
         self._last_request_time = time.time()
 
-    def parse_id(self, input_str: str) -> str:
+    @staticmethod
+    def parse_id(input_str: str) -> str:
         """Extract arXiv ID from URL or string."""
         clean_str = input_str.strip()
         # Matches modern arXiv IDs: YYMM.NNNNN(vV)

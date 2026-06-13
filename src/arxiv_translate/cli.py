@@ -142,6 +142,11 @@ def _resolve_path_from_config(path_value: str | Path, config_path: Optional[Path
     return (Path.cwd().resolve() / path).resolve()
 
 
+def _arxiv_zh_output_dir_name(arxiv_id_or_url: str) -> str:
+    parsed_id = ArxivDownloader.parse_id(arxiv_id_or_url)
+    return f"arxiv-{parsed_id.replace('/', '_')}"
+
+
 def _load_config_for_arxiv_zh(config_path: Optional[Path]) -> Config:
     if config_path is None:
         config = load_config()
@@ -207,7 +212,7 @@ def _resolve_arxiv_zh_options(
         )
 
     output_root = _resolve_path_from_config(resolved_config.paths.output_dir, config)
-    output = output_root / arxiv_id.replace("/", "_")
+    output = output_root / _arxiv_zh_output_dir_name(arxiv_id)
 
     options = ArxivZhOptions(
         output=output,

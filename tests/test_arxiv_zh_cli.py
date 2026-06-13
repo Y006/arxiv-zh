@@ -146,7 +146,7 @@ def test_arxiv_zh_options_come_from_single_config(monkeypatch, tmp_path: Path):
         config=config_path,
     )
 
-    assert options.output == tmp_path / "translated-output" / "2501.12345"
+    assert options.output == tmp_path / "translated-output" / "arxiv-2501.12345"
     assert options.concurrency == 5
     assert options.max_chunks == 2
     assert options.compile_pdf is True
@@ -155,6 +155,50 @@ def test_arxiv_zh_options_come_from_single_config(monkeypatch, tmp_path: Path):
     assert config.fonts.main == "STSong"
     assert config.fonts.sans == "STXihei"
     assert config.fonts.mono == "STKaiti"
+
+
+def test_arxiv_zh_output_dir_uses_parsed_id_for_url(monkeypatch, tmp_path: Path):
+    import arxiv_translate.cli as cli_module
+
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        paths:
+          output_dir: ./translated-output
+        fonts:
+          auto_detect: false
+        """,
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+
+    options, _config = cli_module._resolve_arxiv_zh_options(
+        arxiv_id="https://arxiv.org/html/2410.24164v1",
+        config=config_path,
+    )
+
+    assert options.output == tmp_path / "translated-output" / "arxiv-2410.24164v1"
+
+
+def test_arxiv_zh_output_dir_sanitizes_old_style_id(monkeypatch, tmp_path: Path):
+    import arxiv_translate.cli as cli_module
+
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        paths:
+          output_dir: ./translated-output
+        fonts:
+          auto_detect: false
+        """,
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+
+    options, _config = cli_module._resolve_arxiv_zh_options(
+        arxiv_id="https://arxiv.org/abs/cs/9901001",
+        config=config_path,
+    )
+
+    assert options.output == tmp_path / "translated-output" / "arxiv-cs_9901001"
 
 
 def test_arxiv_zh_rejects_non_deepseek_config(monkeypatch, tmp_path: Path):

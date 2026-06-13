@@ -11,6 +11,7 @@ from .chinese_support import (
     ENGINE_CONFLICT_PRIMITIVES,
     _strip_engine_conflict_primitives,
     inject_chinese_support,
+    normalize_unicode_engine_source,
 )
 
 
@@ -143,6 +144,8 @@ class LaTeXCompiler:
             write_compile_error_summary(log_path, summary_path)
             return CompilationResult(success=False, log_content=message, error_message=message)
 
+        uses_precompiled_bbl = self._prepare_compile_inputs(tex_file, build_path)
+
         def run_command(cmd: List[str]) -> Tuple[bool, str, Optional[str]]:
             header = f"$ {' '.join(cmd)}\n"
             with log_path.open("a", encoding="utf-8") as log_file:
@@ -187,15 +190,18 @@ class LaTeXCompiler:
 
         if prefer_latexmk and shutil.which("latexmk"):
             engine_used = "latexmk"
+            latexmk_cmd = [
+                "latexmk",
+                "-xelatex",
+                "-interaction=nonstopmode",
+                "-file-line-error",
+                f"-output-directory={build_path}",
+            ]
+            if uses_precompiled_bbl:
+                latexmk_cmd.append("-bibtex-")
+            latexmk_cmd.append(tex_file.name)
             success, log_content, error = run_command(
-                [
-                    "latexmk",
-                    "-xelatex",
-                    "-interaction=nonstopmode",
-                    "-file-line-error",
-                    f"-output-directory={build_path}",
-                    tex_file.name,
-                ]
+                latexmk_cmd
             )
         else:
             if not shutil.which("xelatex"):
@@ -261,7 +267,7 @@ class LaTeXCompiler:
                          If provided, contents are copied to the temp compile dir.
         """
         output_path = Path(output_path).resolve()
-        compile_source = latex_source
+        compile_source = normalize_unicode_engine_source(latex_source)
 
         # Create a temporary directory for compilation to keep things clean
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -458,6 +464,92 @@ class LaTeXCompiler:
         except Exception:
             # Ignore copy errors (e.g. permission issues), compilation might still work
             pass
+
+    def _prepare_compile_inputs(self, tex_file: Path, build_path: Path) -> bool:
+        """Normalize TeX source and align precompiled bibliography artifacts."""
+        try:
+            source = tex_file.read_text(encoding="utf-8")
+        except Exception:
+            return False
+
+        normalized = normalize_unicode_engine_source(source)
+        rewritten, bbl_aliases = self._rewrite_bibliography_to_precompiled_bbl(
+            normalized,
+            tex_file,
+        )
+        if rewritten != source:
+            tex_file.write_text(rewritten, encoding="utf-8")
+
+        self._copy_bbl_aliases(tex_file, build_path, bbl_aliases)
+        return bool(bbl_aliases)
+
+    def _rewrite_bibliography_to_precompiled_bbl(
+        self,
+        latex_source: str,
+        tex_file: Path,
+    ) -> Tuple[str, List[Tuple[Path, str]]]:
+        aliases: List[Tuple[Path, str]] = []
+        base_dir = tex_file.parent
+
+        def select_bbl(names: List[str]) -> Optional[List[Tuple[Path, str]]]:
+            if any((base_dir / f"{name}.bib").exists() for name in names):
+                return None
+
+            named_bbls = [(base_dir / f"{name}.bbl", f"{name}.bbl") for name in names]
+            if named_bbls and all(path.exists() for path, _ in named_bbls):
+                return named_bbls
+
+            stem_bbl = base_dir / f"{tex_file.stem}.bbl"
+            if stem_bbl.exists():
+                return [(stem_bbl, stem_bbl.name)]
+
+            main_bbl = base_dir / "main.bbl"
+            if main_bbl.exists():
+                return [(main_bbl, f"{tex_file.stem}.bbl")]
+
+            bbl_files = sorted(base_dir.glob("*.bbl"))
+            if len(bbl_files) == 1:
+                return [(bbl_files[0], f"{tex_file.stem}.bbl")]
+
+            return None
+
+        def replace(match: re.Match[str]) -> str:
+            names = [name.strip() for name in match.group(1).split(",") if name.strip()]
+            selected = select_bbl(names)
+            if not selected:
+                return match.group(0)
+            aliases.extend(selected)
+            return "\n".join(f"\\input{{{alias_name}}}" for _, alias_name in selected)
+
+        rewritten = re.sub(r"\\bibliography\{([^}]+)\}", replace, latex_source)
+        if rewritten != latex_source:
+            rewritten = re.sub(r"\\bibliographystyle\{[^}]+\}\n?", "", rewritten)
+        return rewritten, aliases
+
+    def _copy_bbl_aliases(
+        self,
+        tex_file: Path,
+        build_path: Path,
+        aliases: List[Tuple[Path, str]],
+    ) -> None:
+        if not aliases:
+            stem_bbl = tex_file.parent / f"{tex_file.stem}.bbl"
+            if stem_bbl.exists():
+                aliases = [(stem_bbl, stem_bbl.name)]
+            else:
+                return
+
+        build_path.mkdir(parents=True, exist_ok=True)
+        for source_path, alias_name in aliases:
+            if not source_path.exists():
+                continue
+            target_path = tex_file.parent / alias_name
+            try:
+                if source_path.resolve() != target_path.resolve():
+                    shutil.copy2(source_path, target_path)
+                shutil.copy2(target_path, build_path / alias_name)
+            except Exception:
+                continue
 
     def _run_engine(
         self, engine: str, source_file: Path, cwd: Path, latex_source: str

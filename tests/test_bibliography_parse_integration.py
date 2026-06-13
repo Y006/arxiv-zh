@@ -83,6 +83,33 @@ Hello world.
             # \bibliographystyle should also be preserved
             assert r"\bibliographystyle{plain}" in doc.preamble
 
+    def test_parse_uses_main_bbl_when_bibliography_name_bbl_is_absent(self):
+        """
+        arXiv source archives commonly include main.bbl while the TeX source
+        still says \bibliography{references}; that should compile without BibTeX.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            main_tex = Path(tmpdir) / "main.tex"
+            main_tex.write_text(r"""\documentclass{article}
+\bibliographystyle{plainnat}
+\begin{document}
+Hello world.
+\bibliography{references}
+\end{document}
+""")
+
+            (Path(tmpdir) / "main.bbl").write_text(r"""\begin{thebibliography}{1}
+\bibitem{test} Test Author, \textit{Test Title}, 2024.
+\end{thebibliography}
+""")
+
+            parser = LaTeXParser()
+            doc = parser.parse_file(str(main_tex))
+
+            assert r"\bibliography{references}" not in doc.body_template
+            assert r"\input{main.bbl}" in doc.body_template
+            assert r"\bibliographystyle{plainnat}" not in doc.preamble
+
     def test_bibliography_resolution_order_in_pipeline(self):
         """
         Verify bibliography resolution happens after flatten and before comment removal.

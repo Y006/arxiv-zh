@@ -108,7 +108,12 @@ class LaTeXParser:
             content = f.read()
 
         flattened_content = self._flatten_latex(content, base_dir)
-        flattened_content = self._resolve_bibliography(flattened_content, base_dir)
+        main_stem = os.path.splitext(os.path.basename(filepath))[0]
+        flattened_content = self._resolve_bibliography(
+            flattened_content,
+            base_dir,
+            main_stem=main_stem,
+        )
         flattened_content = self._remove_comments(flattened_content)
         abstract = self.extract_abstract(flattened_content)
         preamble, body_content = self._split_preamble_body(flattened_content)
@@ -1351,18 +1356,28 @@ class LaTeXParser:
                 return path
         return None
 
-    def _resolve_bibliography(self, text: str, base_dir: str) -> str:
+    def _resolve_bibliography(
+        self,
+        text: str,
+        base_dir: str,
+        main_stem: Optional[str] = None,
+    ) -> str:
         r"""Resolve bibliography commands to use .bbl files when .bib is absent.
 
         If ALL bibliography names have only .bbl files (no .bib), replace
         \bibliography{name} with \input{name.bbl} commands and remove
         \bibliographystyle{} lines.
 
+        Some arXiv source archives include only the TeX job's precompiled
+        .bbl file, e.g. main.bbl, even when the source says
+        \bibliography{references}. In that case, use the job .bbl.
+
         If ANY name has a .bib file, keep the original command unchanged.
 
         Args:
             text: LaTeX content containing bibliography commands
             base_dir: Base directory to look for .bib and .bbl files
+            main_stem: Main TeX filename stem for jobname .bbl fallback
 
         Returns:
             Modified text with bibliography commands resolved
@@ -1381,7 +1396,7 @@ class LaTeXParser:
 
             # Check file existence for each name
             has_bib = False
-            has_bbl = False
+            bbl_paths: List[str] = []
 
             for name in names:
                 bib_path = os.path.join(base_dir, f"{name}.bib")
@@ -1390,16 +1405,32 @@ class LaTeXParser:
                 if os.path.exists(bib_path):
                     has_bib = True
                 if os.path.exists(bbl_path):
-                    has_bbl = True
+                    bbl_paths.append(f"{name}.bbl")
 
             # If any .bib exists, keep original
             if has_bib:
                 return full_match
 
-            # If no .bib but has .bbl, replace with input commands
-            if has_bbl and not has_bib:
-                input_commands = [f"\\input{{{name}.bbl}}" for name in names]
+            # If no .bib but each bibliography name has a .bbl, input all of them.
+            if len(bbl_paths) == len(names):
+                input_commands = [f"\\input{{{bbl_path}}}" for bbl_path in bbl_paths]
                 return "\n".join(input_commands)
+
+            # arXiv often ships main.bbl for \bibliography{references}.
+            if main_stem:
+                job_bbl_name = f"{main_stem}.bbl"
+                job_bbl_path = os.path.join(base_dir, job_bbl_name)
+                if os.path.exists(job_bbl_path):
+                    return f"\\input{{{job_bbl_name}}}"
+
+            bbl_files = [
+                filename
+                for filename in os.listdir(base_dir)
+                if filename.lower().endswith(".bbl")
+                and os.path.isfile(os.path.join(base_dir, filename))
+            ]
+            if len(bbl_files) == 1:
+                return f"\\input{{{bbl_files[0]}}}"
 
             # Neither file exists: keep original (graceful fallback)
             return full_match

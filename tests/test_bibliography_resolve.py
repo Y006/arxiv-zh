@@ -133,6 +133,26 @@ class TestBibliographyResolve:
         # Should keep original
         assert r"\bibliography{nonexistent}" in result
 
+    def test_jobname_bbl_fallback_replaces_missing_bibliography_name(self):
+        """arXiv often ships main.bbl even when the source says \bibliography{references}."""
+        self._create_file(
+            "main.bbl",
+            "\\begin{thebibliography}\n\\bibitem{test}\n\\end{thebibliography}",
+        )
+
+        text = r"""\bibliographystyle{plainnat}
+\bibliography{references}"""
+
+        result = self.parser._resolve_bibliography(
+            text,
+            self.temp_dir,
+            main_stem="main",
+        )
+
+        assert r"\input{main.bbl}" in result
+        assert r"\bibliography{references}" not in result
+        assert r"\bibliographystyle{plainnat}" not in result
+
     def test_both_files_exist_prefer_bib(self):
         """When both .bib and .bbl exist, prefer .bib (keep original)."""
         self._create_file("refs.bib", "@article{test}")

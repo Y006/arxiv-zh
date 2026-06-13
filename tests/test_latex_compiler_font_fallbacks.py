@@ -172,6 +172,102 @@ def test_compile_file_sets_osfontdir_when_fonts_dir_exists(monkeypatch, tmp_path
     assert "/existing/fonts" in captured["env"]["OSFONTDIR"]
 
 
+def test_prepare_compile_inputs_sanitizes_unicode_engine_conflicts(tmp_path: Path):
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\n"
+        "\\usepackage[pdftex]{graphicx}\n"
+        "\\pdfinfo{\n"
+        "  /Title (Old)\n"
+        "}\n"
+        "\\begin{document}\n"
+        "\\ModelSymbol\\架构 与 \\ModelSymbol模型\n"
+        "\\end{document}\n",
+        encoding="utf-8",
+    )
+
+    compiler = LaTeXCompiler()
+    compiler._prepare_compile_inputs(tex_file, tmp_path / "build")
+
+    patched = tex_file.read_text(encoding="utf-8")
+    assert "\\pdfinfo" not in patched
+    assert "\\usepackage{graphicx}" in patched
+    assert "\\ModelSymbol{}架构" in patched
+    assert "\\ModelSymbol{}模型" in patched
+
+
+def test_prepare_compile_inputs_aliases_precompiled_bbl_to_tex_stem(tmp_path: Path):
+    build_dir = tmp_path / "build"
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "\\bibliography{references}\n"
+        "\\end{document}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.bbl").write_text(
+        "\\begin{thebibliography}{1}\\bibitem{x} X\\end{thebibliography}",
+        encoding="utf-8",
+    )
+
+    compiler = LaTeXCompiler()
+    compiler._prepare_compile_inputs(tex_file, build_dir)
+
+    patched = tex_file.read_text(encoding="utf-8")
+    assert "\\bibliography{references}" not in patched
+    assert "\\input{main_zh.bbl}" in patched
+    assert (tmp_path / "main_zh.bbl").read_text(encoding="utf-8").startswith(
+        "\\begin{thebibliography}"
+    )
+    assert (build_dir / "main_zh.bbl").exists()
+
+
+def test_compile_file_disables_bibtex_when_using_precompiled_bbl(
+    monkeypatch,
+    tmp_path: Path,
+):
+    build_dir = tmp_path / "build"
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "\\citep{key}\n"
+        "\\bibliography{references}\n"
+        "\\end{document}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.bbl").write_text(
+        "\\begin{thebibliography}{1}\\bibitem{key} Key\\end{thebibliography}",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        build_dir.mkdir(parents=True, exist_ok=True)
+        (build_dir / "main_zh.pdf").write_bytes(
+            b"%PDF-1.5\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        lambda name: "/usr/bin/latexmk" if name == "latexmk" else None,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler().compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+    )
+
+    assert result.success is True
+    assert "-bibtex-" in captured["cmd"]
+
+
 def test_apply_missing_file_fallback_sets_bxcoloremoji_names_false(tmp_path: Path):
     compiler = LaTeXCompiler()
     source = r"""
@@ -350,23 +446,13 @@ def test_extract_error_detects_critical_package_error():
     assert "requires XeTeX" in extracted
 
 
-def test_compile_retries_after_pdftex_primitive_conflict(monkeypatch, tmp_path: Path):
+def test_compile_strips_pdftex_primitive_before_first_engine_run(monkeypatch, tmp_path: Path):
     compiler = LaTeXCompiler()
     compiler.engines = ["xelatex"]
     call_count = {"n": 0}
 
     def fake_run_engine(engine, source_file, cwd, latex_source):
         call_count["n"] += 1
-        if call_count["n"] == 1:
-            assert r"\pdfoutput=1" in latex_source
-            return (
-                False,
-                "./main.tex:1: Undefined control sequence.\n"
-                "l.1 \\pdfoutput\n"
-                "              =1\n",
-                "Compilation command exited with code 1. Unknown error (check full logs)",
-            )
-
         assert r"\pdfoutput=1" not in latex_source
         (cwd / "main.pdf").write_bytes(b"%PDF-1.5\n1 0 obj\n<<>>\nendobj\n%%EOF\n")
         return (True, "ok", None)
@@ -389,4 +475,4 @@ def test_compile_retries_after_pdftex_primitive_conflict(monkeypatch, tmp_path: 
     )
 
     assert result.success is True
-    assert call_count["n"] == 2
+    assert call_count["n"] == 1

@@ -33,6 +33,7 @@ dependencies = [
   "requests",
   "openai>=1.0.0",
   "zstandard>=0.23.0",
+  "fonttools>=4",
 ]
 
 [project.optional-dependencies]

@@ -4,6 +4,11 @@ import subprocess
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Union
 
+try:
+    from fontTools.ttLib import TTFont
+except ImportError:  # pragma: no cover - exercised through fallback tests
+    TTFont = None  # type: ignore[assignment]
+
 ENGINE_CONFLICT_PRIMITIVES = (
     "pdfoutput",
     "pdfminorversion",
@@ -210,35 +215,105 @@ def _split_font_families(output: str) -> List[str]:
     return sorted(fonts)
 
 
-def get_fonts_from_dir(font_dir: Optional[Union[str, Path]]) -> List[str]:
-    """Detect font family names from font files in a local directory."""
-    if not font_dir or not shutil.which("fc-scan"):
+def _dedupe_font_values(values: List[str]) -> List[str]:
+    seen = set()
+    deduped: List[str] = []
+    for value in values:
+        value = value.strip()
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(value)
+    return deduped
+
+
+def find_font_files(font_dir: Optional[Union[str, Path]]) -> List[Path]:
+    """Return local font files from a configured font directory."""
+    if not font_dir:
         return []
 
     root = Path(font_dir).expanduser()
     if not root.exists() or not root.is_dir():
         return []
 
-    font_files = sorted(
-        path
+    return sorted(
+        path.resolve()
         for path in root.rglob("*")
         if path.is_file() and path.suffix.lower() in FONT_FILE_SUFFIXES
     )
-    if not font_files:
+
+
+def _fonttools_family_names(font_file: Path) -> List[str]:
+    if TTFont is None:
         return []
 
     try:
-        result = subprocess.run(
-            ["fc-scan", "--format", "%{family}\n", *[str(path) for path in font_files]],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if result.returncode != 0:
+        font = TTFont(str(font_file), fontNumber=0, lazy=True)
+    except Exception:
+        try:
+            font = TTFont(str(font_file), lazy=True)
+        except Exception:
             return []
-        return _split_font_families(result.stdout)
+
+    try:
+        names = []
+        for name in font["name"].names:
+            if name.nameID not in {1, 4, 16}:
+                continue
+            try:
+                value = name.toUnicode().strip()
+            except Exception:
+                continue
+            if value:
+                names.append(value)
+        return _dedupe_font_values(names)
     except Exception:
         return []
+    finally:
+        try:
+            font.close()
+        except Exception:
+            pass
+
+
+def _filename_font_fallback_names(font_file: Path) -> List[str]:
+    return _dedupe_font_values([font_file.stem, font_file.name])
+
+
+def get_fonts_from_dir(font_dir: Optional[Union[str, Path]]) -> List[str]:
+    """Detect usable font values from local font files."""
+    font_files = find_font_files(font_dir)
+    if not font_files:
+        return []
+
+    fonts: List[str] = [str(path) for path in font_files]
+
+    if shutil.which("fc-scan"):
+        try:
+            result = subprocess.run(
+                [
+                    "fc-scan",
+                    "--format",
+                    "%{family}\n",
+                    *[str(path) for path in font_files],
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode == 0:
+                fonts.extend(_split_font_families(result.stdout))
+        except Exception:
+            pass
+
+    for font_file in font_files:
+        family_names = _fonttools_family_names(font_file)
+        fonts.extend(family_names or _filename_font_fallback_names(font_file))
+
+    return _dedupe_font_values(fonts)
 
 
 def get_system_fonts() -> List[str]:
@@ -280,7 +355,7 @@ def get_available_fonts(
 
 
 def detect_cjk_fonts(available_fonts: List[str]) -> Dict[str, str]:
-    """Select best available CJK fonts based on priority."""
+    """Select best available CJK fonts from actually detected fonts."""
     # Priority groups: (Serif, Sans, Mono)
     font_candidates = [
         # Project-local sample bundle
@@ -317,12 +392,19 @@ def detect_cjk_fonts(available_fonts: List[str]) -> Dict[str, str]:
         {"main": ["FandolSong"], "sans": ["FandolHei"], "mono": ["FandolKai"]},
     ]
 
+    def font_value_matches(candidate: str, value: str) -> bool:
+        candidate_key = candidate.lower()
+        value_key = value.lower()
+        if candidate_key == value_key or candidate_key in value_key:
+            return True
+        if Path(value).suffix.lower() in FONT_FILE_SUFFIXES:
+            return candidate_key in Path(value).stem.lower()
+        return False
+
     def find_match(candidates: List[str]) -> Optional[str]:
         for cand in candidates:
             for avail in available_fonts:
-                if cand.lower() == avail.lower():
-                    return avail
-                if cand.lower() in avail.lower():
+                if font_value_matches(cand, avail):
                     return avail
         return None
 
@@ -333,12 +415,7 @@ def detect_cjk_fonts(available_fonts: List[str]) -> Dict[str, str]:
             mono = find_match(group["mono"]) or sans
             return {"main": main, "sans": sans, "mono": mono}
 
-    # Fallback
-    return {
-        "main": "Noto Serif CJK SC",
-        "sans": "Noto Sans CJK SC",
-        "mono": "Noto Sans Mono CJK SC",
-    }
+    return {}
 
 
 def _config_value(config: Optional[Any], key: str, default: Any = None) -> Any:
@@ -354,8 +431,61 @@ def _font_available(font_name: Optional[str], available_fonts: List[str]) -> boo
         return False
     font_key = font_name.lower()
     return any(
-        font_key == available.lower() or font_key in available.lower()
+        font_key == available.lower()
+        or font_key in available.lower()
+        or (
+            Path(available).suffix.lower() in FONT_FILE_SUFFIXES
+            and font_key in Path(available).stem.lower()
+        )
         for available in available_fonts
+    )
+
+
+def _is_font_file_value(font_value: Optional[str]) -> bool:
+    return bool(font_value and Path(font_value).suffix.lower() in FONT_FILE_SUFFIXES)
+
+
+def _resolve_font_file_value(
+    font_value: str,
+    font_dir: Optional[Union[str, Path]],
+) -> Path:
+    raw_path = Path(font_value).expanduser()
+    candidates: List[Path] = []
+    if raw_path.is_absolute():
+        candidates.append(raw_path)
+    else:
+        candidates.append((Path.cwd() / raw_path).resolve())
+        if font_dir:
+            base_dir = Path(font_dir).expanduser()
+            candidates.append((base_dir / raw_path).resolve())
+            candidates.append((base_dir / raw_path.name).resolve())
+        candidates.append(raw_path)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return candidates[0]
+
+
+def _fontspec_path_option(directory: Path) -> str:
+    path = directory.as_posix()
+    if path and not path.endswith("/"):
+        path += "/"
+    return f"Path={{{path}}}"
+
+
+def _font_command(
+    command: str,
+    font_value: str,
+    font_dir: Optional[Union[str, Path]],
+) -> str:
+    if not _is_font_file_value(font_value):
+        return f"\\{command}{{{font_value}}}"
+
+    font_path = _resolve_font_file_value(font_value, font_dir)
+    return (
+        f"\\{command}[{_fontspec_path_option(font_path.parent)}]"
+        f"{{{font_path.name}}}"
     )
 
 
@@ -390,20 +520,20 @@ def _resolved_font_commands(
     if engine == "lualatex":
         commands = []
         if main_font:
-            commands.append(f"\\setmainjfont{{{main_font}}}")
+            commands.append(_font_command("setmainjfont", main_font, cfg_dir))
         if sans_font:
-            commands.append(f"\\setsansjfont{{{sans_font}}}")
+            commands.append(_font_command("setsansjfont", sans_font, cfg_dir))
         if mono_font:
-            commands.append(f"\\setmonojfont{{{mono_font}}}")
+            commands.append(_font_command("setmonojfont", mono_font, cfg_dir))
         return commands
 
     commands = []
     if main_font:
-        commands.append(f"\\setCJKmainfont{{{main_font}}}")
+        commands.append(_font_command("setCJKmainfont", main_font, cfg_dir))
     if sans_font:
-        commands.append(f"\\setCJKsansfont{{{sans_font}}}")
+        commands.append(_font_command("setCJKsansfont", sans_font, cfg_dir))
     if mono_font:
-        commands.append(f"\\setCJKmonofont{{{mono_font}}}")
+        commands.append(_font_command("setCJKmonofont", mono_font, cfg_dir))
     return commands
 
 

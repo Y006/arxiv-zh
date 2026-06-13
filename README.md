@@ -70,6 +70,6 @@ export DEEPSEEK_API_KEY=sk-...
 
 项目保留三枚默认 CJK 字体：`fonts/STSONG.TTF`、`fonts/STXIHEI.TTF`、`fonts/STKAITI.TTF`
 
-如果配置里的 `fonts.auto_detect` 为 `true`，CLI 会优先扫描配置中的 `fonts.dir`，再回退到项目 `fonts/` 和系统字体。
+如果配置里的 `fonts.auto_detect` 为 `true`，CLI 会优先扫描配置中的 `fonts.dir`，再回退到项目 `fonts/` 和系统字体。项目自带的 `.TTF` 字体可直接通过文件路径注入 LaTeX，不要求系统安装 `fontconfig`。
 
 编译默认按 TinyTeX 优先适配：配置会把常见 TinyTeX bin 目录加入 `PATH`，优先使用 `latexmk + xelatex`，遇到缺失 `.sty` / `.cls` 等文件时会尝试通过 `tlmgr search` 和 `tlmgr install` 自动安装缺包。首次编译需要下载包时可能较慢，`config.example.yaml` 已将编译超时放宽到 600 秒、缺包安装超时放宽到 1200 秒。

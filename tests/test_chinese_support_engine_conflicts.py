@@ -1,4 +1,6 @@
 from arxiv_translate.compiler.chinese_support import (
+    detect_cjk_fonts,
+    get_fonts_from_dir,
     _guard_control_word_cjk_boundaries,
     _strip_engine_conflict_primitives,
     _strip_unicode_engine_driver_options,
@@ -6,6 +8,52 @@ from arxiv_translate.compiler.chinese_support import (
     inject_chinese_support,
     inject_chinese_support_for_engine,
 )
+
+
+def test_get_fonts_from_dir_falls_back_to_local_files_without_fontconfig(
+    monkeypatch,
+    tmp_path,
+):
+    import arxiv_translate.compiler.chinese_support as chinese_support
+
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    (fonts_dir / "STSONG.TTF").write_bytes(b"not a real font")
+    (fonts_dir / "STXIHEI.TTF").write_bytes(b"not a real font")
+
+    monkeypatch.setattr(chinese_support.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(chinese_support, "TTFont", None)
+
+    fonts = get_fonts_from_dir(fonts_dir)
+
+    assert str((fonts_dir / "STSONG.TTF").resolve()) in fonts
+    assert str((fonts_dir / "STXIHEI.TTF").resolve()) in fonts
+    assert "STSONG" in fonts
+    assert "STXIHEI" in fonts
+
+
+def test_detect_cjk_fonts_does_not_guess_unavailable_noto():
+    assert detect_cjk_fonts([]) == {}
+
+
+def test_detect_cjk_fonts_prefers_project_font_files(tmp_path):
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    main = fonts_dir / "STSONG.TTF"
+    sans = fonts_dir / "STXIHEI.TTF"
+    mono = fonts_dir / "STKAITI.TTF"
+    for font_file in (main, sans, mono):
+        font_file.write_bytes(b"not a real font")
+
+    detected = detect_cjk_fonts(
+        [str(main.resolve()), str(sans.resolve()), str(mono.resolve())]
+    )
+
+    assert detected == {
+        "main": str(main.resolve()),
+        "sans": str(sans.resolve()),
+        "mono": str(mono.resolve()),
+    }
 
 
 def test_strip_engine_conflict_primitives_removes_pdfoutput_in_preamble():
@@ -169,6 +217,62 @@ def test_inject_chinese_support_for_engine_uses_luatexja_for_lualatex():
     assert "\\setmainjfont{FandolSong}" in patched
     assert "\\usepackage{xeCJK}" not in patched
     assert "\\setCJKmainfont" not in patched
+
+
+def test_inject_chinese_support_uses_font_file_paths(tmp_path):
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    main = fonts_dir / "STSONG.TTF"
+    sans = fonts_dir / "STXIHEI.TTF"
+    mono = fonts_dir / "STKAITI.TTF"
+    for font_file in (main, sans, mono):
+        font_file.write_bytes(b"not a real font")
+
+    source = "\\documentclass{article}\n\\begin{document}\n中文\n\\end{document}\n"
+
+    patched = inject_chinese_support_for_engine(
+        source,
+        engine="xelatex",
+        font_config={
+            "dir": str(fonts_dir),
+            "main": "STSONG.TTF",
+            "sans": "STXIHEI.TTF",
+            "mono": "STKAITI.TTF",
+            "auto_detect": False,
+        },
+    )
+
+    font_path_option = f"Path={{{fonts_dir.as_posix()}/}}"
+    assert f"\\setCJKmainfont[{font_path_option}]{{STSONG.TTF}}" in patched
+    assert f"\\setCJKsansfont[{font_path_option}]{{STXIHEI.TTF}}" in patched
+    assert f"\\setCJKmonofont[{font_path_option}]{{STKAITI.TTF}}" in patched
+
+
+def test_inject_chinese_support_auto_detects_local_font_files_without_fontconfig(
+    monkeypatch,
+    tmp_path,
+):
+    import arxiv_translate.compiler.chinese_support as chinese_support
+
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    for filename in ("STSONG.TTF", "STXIHEI.TTF", "STKAITI.TTF"):
+        (fonts_dir / filename).write_bytes(b"not a real font")
+
+    monkeypatch.setattr(chinese_support.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(chinese_support, "TTFont", None)
+
+    source = "\\documentclass{article}\n\\begin{document}\n中文\n\\end{document}\n"
+    patched = inject_chinese_support_for_engine(
+        source,
+        engine="xelatex",
+        font_config={"dir": str(fonts_dir), "auto_detect": True},
+    )
+
+    font_path_option = f"Path={{{fonts_dir.as_posix()}/}}"
+    assert f"\\setCJKmainfont[{font_path_option}]{{STSONG.TTF}}" in patched
+    assert f"\\setCJKsansfont[{font_path_option}]{{STXIHEI.TTF}}" in patched
+    assert f"\\setCJKmonofont[{font_path_option}]{{STKAITI.TTF}}" in patched
 
 
 def test_inject_chinese_support_for_engine_skips_pdflatex_cjk_by_default():

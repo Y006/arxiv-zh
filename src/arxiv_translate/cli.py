@@ -24,6 +24,7 @@ from arxiv_translate.cache.local_translation_cache import LocalTranslationCache
 from arxiv_translate.compiler import LaTeXCompiler
 from arxiv_translate.compiler.chinese_support import (
     detect_cjk_fonts,
+    find_font_files,
     get_available_fonts,
 )
 from arxiv_translate.downloader.arxiv import ArxivDownloader
@@ -199,9 +200,10 @@ def _load_config_for_arxiv_zh(config_path: Optional[Path]) -> Config:
 
     if config.fonts.auto_detect:
         detected_fonts = detect_cjk_fonts(get_available_fonts(font_dir=resolved_font_dir))
-        config.fonts.main = detected_fonts["main"]
-        config.fonts.sans = detected_fonts["sans"]
-        config.fonts.mono = detected_fonts["mono"]
+        if detected_fonts:
+            config.fonts.main = detected_fonts["main"]
+            config.fonts.sans = detected_fonts["sans"]
+            config.fonts.mono = detected_fonts["mono"]
 
     return config
 
@@ -313,7 +315,9 @@ def _font_name_available(font_name: Optional[str], available_fonts: list[str]) -
         return False
     font_key = font_name.lower()
     return any(
-        font_key == available.lower() or font_key in available.lower()
+        font_key == available.lower()
+        or font_key in available.lower()
+        or font_key in Path(available).name.lower()
         for available in available_fonts
     )
 
@@ -428,6 +432,7 @@ def _collect_arxiv_zh_doctor_checks(config_path: Optional[Path]) -> list[ArxivZh
             pass
 
     font_dir = Path(config.fonts.dir).expanduser() if config.fonts.dir else None
+    local_font_files = find_font_files(font_dir)
     available_fonts = get_available_fonts(font_dir=font_dir)
     configured_fonts = [config.fonts.main, config.fonts.sans, config.fonts.mono]
     missing_fonts = [
@@ -444,6 +449,16 @@ def _collect_arxiv_zh_doctor_checks(config_path: Optional[Path]) -> list[ArxivZh
                 "WARN",
                 "以下配置字体未在本机检测到："
                 + ", ".join(str(font) for font in missing_fonts),
+            )
+        )
+    elif local_font_files and not shutil.which("fc-scan"):
+        checks.append(
+            _doctor_check(
+                "中文字体",
+                "PASS",
+                "fontconfig: missing; "
+                f"local fonts: found {len(local_font_files)} files; "
+                "fallback to local font files",
             )
         )
     elif all(configured_fonts):

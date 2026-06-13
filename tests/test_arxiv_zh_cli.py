@@ -335,6 +335,55 @@ def test_arxiv_zh_doctor_reports_missing_key_without_ping(monkeypatch, tmp_path:
     )
 
 
+def test_arxiv_zh_doctor_accepts_local_fonts_without_fontconfig(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import arxiv_translate.cli as cli_module
+
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    for filename in ("STSONG.TTF", "STXIHEI.TTF", "STKAITI.TTF"):
+        (fonts_dir / filename).write_bytes(b"not a real font")
+
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        llm:
+          key: sk-test
+        paths:
+          output_dir: ./translated-output
+        fonts:
+          dir: ./fonts
+          auto_detect: true
+        compilation:
+          enabled: false
+        """,
+    )
+
+    class DummyProvider:
+        async def ping(self):
+            return "hi"
+
+    monkeypatch.setattr(cli_module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.chinese_support.TTFont",
+        None,
+    )
+    monkeypatch.setattr(cli_module, "get_sdk_client", lambda *_args, **_kwargs: DummyProvider())
+    monkeypatch.setattr(cli_module, "_probe_arxiv_reachable", lambda: (True, "HTTP 200"))
+
+    checks = cli_module._collect_arxiv_zh_doctor_checks(config_path)
+
+    assert any(
+        check.name == "中文字体"
+        and check.status == "PASS"
+        and "fontconfig: missing" in check.message
+        and "local fonts: found 3 files" in check.message
+        for check in checks
+    )
+
+
 def test_arxiv_zh_doctor_cli_uses_exit_status(monkeypatch):
     import arxiv_translate.cli as cli_module
 

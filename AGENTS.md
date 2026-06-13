@@ -1,51 +1,34 @@
 # AGENTS.md
 
-## 核心原则：系统性思维
-
-> **你不是在"修 bug"，你是在"消灭一类 bug"。**
-
-面对任何问题时，禁止"头痛医头"。你必须先理解问题的根因（root cause），然后评估同一根因是否会在代码库的其他位置产生类似问题。修复方案必须覆盖所有已知的受影响位置，而非仅修复当前触发问题的那一处。
-
-具体来说，每次修复前请执行以下思考步骤：
-1. **定位根因**：这个问题的本质原因是什么？是逻辑错误、边界遗漏、类型假设，还是其他？
-2. **搜索同类**：在代码库中搜索是否存在相同模式的代码。使用 `grep`/`rg` 等工具主动排查，不要依赖猜测。
-3. **统一修复**：对所有同类问题一并修复，而非逐个等待它们暴露。
-4. **回归验证**：确保修复不会引入新问题，对相关的边界情况也编写测试。
-
----
-
-## 工作流规范
-
-### Git 提交规范
-- 每完成一个 task，必须先运测试通过后**再用 git 提交。
-- Git commit message 使用**中文**。
-- 提交粒度：一个 task 对应一次提交，保持原子性。
-
-### 修复规范
-- 修复任何问题时，必须同步检查并修复**所有同模式的问题**（参见上方"核心原则"）。
-- 为修复的问题补充测试用例，覆盖：
-  - 正常路径
-  - 边界条件（空值、极端长度、特殊字符等）
-  - 与本次修复相关的回归场景
-
-### 翻译任务专项要求
-翻译任务完成后，必须执行以下全流程验证：
-1. **逐项对比**原始 `.tex` 文件与翻译后输出的 `.tex` 文件。
-2. 验证标准（两项均须通过）：
-   - **翻译质量**：译文准确、通顺，无遗漏、无多译。
-   - **格式一致性**：LaTeX 结构、命令、环境、标签与原文件严格一致，仅文本内容被翻译。
-3. 如发现不一致，**立即修复并重新验证**，直到通过为止。
-
-### 写入文件规范
-长文本需要分段写入，避免触发max_tokens上限。
-
 ## arxiv-zh 本地使用速记
 
 - 当前本地主入口是 `arxiv-zh`；在开发环境里优先使用 `uv run arxiv-zh ...`。
-- 第一版只支持 DeepSeek；默认模型是 `deepseek-chat`，需要切换时显式传 `--model`。
+- 生产使用建议显式传入配置文件：
+  ```bash
+  uv run arxiv-zh <arxiv_id_or_url> --config config.yaml
+  ```
+- 本地首次使用：
+  ```bash
+  uv sync
+  cp .env.example .env
+  cp config.example.yaml config.yaml
+  ```
+- DeepSeek 密钥可写入项目根目录 `.env`，或通过 shell 环境变量提供：
+  ```bash
+  export DEEPSEEK_API_KEY=sk-...
+  ```
+- 默认只支持 DeepSeek；默认模型以 `config.yaml` / `config.example.yaml` 中的 `llm.models` 为准。
 - 快速验证命令：
   ```bash
-  uv run arxiv-zh 2501.12345 --provider deepseek --compile --max-chunks 2 --output ./output/test-paper
+  uv run arxiv-zh 2501.12345 --config config.yaml
+  ```
+- URL 输入也会先解析为 arXiv ID：
+  ```bash
+  uv run arxiv-zh https://arxiv.org/html/2410.24164v1 --config config.yaml
+  ```
+- 默认输出目录格式：
+  ```text
+  output/arxiv-<arxiv_id>/
   ```
 - 编译策略：
   - 优先 `latexmk + xelatex`
@@ -56,6 +39,3 @@
   - `logs/compile_error_summary.md`
   - `logs/compile.log`
 - 如果自动修复后的译文成功编译，`translated/` 下可能额外出现 `main_zh.before_compile.tex` 备份文件。
-
-## Parser Debug模式
-当用户要求进入Parser 的Debug模式时，你需要测试 src/arxiv_translate/parser/latex_parser.py。逐步执行代码中的函数，将中间文件存放在debug文件夹下。用户核对无误后，再将中间产物送给下一个函数，如此执行。这样做的目的是清晰地找到具体是parser中的哪一步出现了问题，从而制定解决方案。

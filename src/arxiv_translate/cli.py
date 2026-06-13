@@ -1,7 +1,7 @@
 import asyncio
 import importlib.metadata as metadata
 import shutil
-import time
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -87,6 +87,13 @@ class ArxivZhOptions:
     max_chunks: Optional[int] = None
 
 
+@dataclass
+class ArxivZhDoctorCheck:
+    name: str
+    status: str
+    message: str
+
+
 def _append_text_log(path: Path, message: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as log_file:
@@ -140,6 +147,15 @@ def _resolve_path_from_config(path_value: str | Path, config_path: Optional[Path
     if config_path is not None:
         return (config_path.expanduser().resolve().parent / path).resolve()
     return (Path.cwd().resolve() / path).resolve()
+
+
+def _resolve_arxiv_zh_api_key(config: Config) -> tuple[Optional[str], str]:
+    api_key_env = config.llm.key_env or "DEEPSEEK_API_KEY"
+    api_key = config.llm.key or get_env_value(
+        api_key_env,
+        dotenv_files=_arxiv_zh_dotenv_paths(),
+    )
+    return api_key, api_key_env
 
 
 def _arxiv_zh_output_dir_name(arxiv_id_or_url: str) -> str:
@@ -200,11 +216,7 @@ def _resolve_arxiv_zh_options(
     if resolved_config.llm.sdk != "deepseek":
         raise ValueError("arxiv-zh only supports llm.sdk: deepseek in config.")
 
-    api_key_env = resolved_config.llm.key_env or "DEEPSEEK_API_KEY"
-    api_key = resolved_config.llm.key or get_env_value(
-        api_key_env,
-        dotenv_files=_arxiv_zh_dotenv_paths(),
-    )
+    api_key, api_key_env = _resolve_arxiv_zh_api_key(resolved_config)
     if not api_key:
         raise ValueError(
             f"{api_key_env} is required. Export it, put it in .env, or set "
@@ -267,6 +279,283 @@ def _write_arxiv_zh_report(
         ]
     )
     layout.report.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _arxiv_zh_compiler_from_config(config: Config) -> LaTeXCompiler:
+    return LaTeXCompiler(
+        timeout=config.compilation.timeout,
+        fonts_dir=config.fonts.dir,
+        use_tinytex=config.compilation.use_tinytex,
+        tinytex_paths=config.compilation.tinytex_paths,
+        install_missing_packages=config.compilation.install_missing_packages,
+        install_timeout=config.compilation.install_timeout,
+        max_package_install_rounds=config.compilation.max_package_install_rounds,
+    )
+
+
+def _doctor_check(name: str, status: str, message: str) -> ArxivZhDoctorCheck:
+    return ArxivZhDoctorCheck(name=name, status=status, message=message)
+
+
+def _probe_writable_directory(path: Path) -> tuple[bool, str]:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".arxiv-zh-doctor-write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True, str(path)
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _font_name_available(font_name: Optional[str], available_fonts: list[str]) -> bool:
+    if not font_name:
+        return False
+    font_key = font_name.lower()
+    return any(
+        font_key == available.lower() or font_key in available.lower()
+        for available in available_fonts
+    )
+
+
+def _probe_arxiv_reachable(timeout: int = 8) -> tuple[bool, str]:
+    request = urllib.request.Request(
+        "https://arxiv.org",
+        headers={"User-Agent": "arxiv-zh-doctor"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = getattr(response, "status", None) or response.getcode()
+            response.read(1)
+        return True, f"HTTP {status}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+async def _ping_arxiv_zh_llm(config: Config, api_key: str) -> str:
+    provider = get_sdk_client(
+        config.llm.sdk,
+        model=config.llm.get_model(),
+        key=api_key,
+        endpoint=config.llm.endpoint or "https://api.deepseek.com",
+        temperature=config.llm.temperature,
+        max_tokens=config.llm.max_tokens,
+    )
+    return await provider.ping()
+
+
+def _collect_arxiv_zh_doctor_checks(config_path: Optional[Path]) -> list[ArxivZhDoctorCheck]:
+    checks: list[ArxivZhDoctorCheck] = []
+
+    try:
+        config = _load_config_for_arxiv_zh(config_path)
+    except Exception as exc:
+        checks.append(_doctor_check("配置文件", "FAIL", str(exc)))
+        return checks
+
+    config_source = str(config_path) if config_path else "默认配置"
+    checks.append(_doctor_check("配置文件", "PASS", f"已加载 {config_source}"))
+
+    if config.llm.sdk == "deepseek":
+        checks.append(_doctor_check("LLM SDK", "PASS", "deepseek"))
+    else:
+        checks.append(
+            _doctor_check(
+                "LLM SDK",
+                "FAIL",
+                "arxiv-zh 当前只支持 llm.sdk: deepseek",
+            )
+        )
+
+    api_key, api_key_env = _resolve_arxiv_zh_api_key(config)
+    if api_key:
+        checks.append(
+            _doctor_check(
+                "API Key",
+                "PASS",
+                f"已通过 llm.key 或 {api_key_env}/.env 读取",
+            )
+        )
+    else:
+        checks.append(
+            _doctor_check(
+                "API Key",
+                "FAIL",
+                f"未找到 {api_key_env}，请配置 shell 环境变量、.env 或 llm.key",
+            )
+        )
+
+    if config.llm.sdk == "deepseek" and api_key:
+        try:
+            result = asyncio.run(_ping_arxiv_zh_llm(config, api_key))
+            preview = result.strip().replace("\n", " ")[:80] or "empty response"
+            checks.append(_doctor_check("DeepSeek 连通性", "PASS", preview))
+        except Exception as exc:
+            checks.append(_doctor_check("DeepSeek 连通性", "FAIL", str(exc)))
+    else:
+        checks.append(
+            _doctor_check(
+                "DeepSeek 连通性",
+                "WARN",
+                "跳过：LLM SDK 或 API Key 未通过检查",
+            )
+        )
+
+    output_root = _resolve_path_from_config(config.paths.output_dir, config_path)
+    ok, detail = _probe_writable_directory(output_root)
+    checks.append(
+        _doctor_check(
+            "输出目录",
+            "PASS" if ok else "FAIL",
+            f"可写：{detail}" if ok else f"不可写：{detail}",
+        )
+    )
+
+    cache_root = output_root / ".doctor-cache"
+    ok, detail = _probe_writable_directory(cache_root)
+    checks.append(
+        _doctor_check(
+            "缓存目录",
+            "PASS" if ok else "FAIL",
+            f"可写：{detail}" if ok else f"不可写：{detail}",
+        )
+    )
+    if ok:
+        try:
+            cache_root.rmdir()
+        except OSError:
+            pass
+
+    font_dir = Path(config.fonts.dir).expanduser() if config.fonts.dir else None
+    available_fonts = get_available_fonts(font_dir=font_dir)
+    configured_fonts = [config.fonts.main, config.fonts.sans, config.fonts.mono]
+    missing_fonts = [
+        font
+        for font in configured_fonts
+        if font and not _font_name_available(font, available_fonts)
+    ]
+    if font_dir and not font_dir.exists():
+        checks.append(_doctor_check("中文字体", "WARN", f"字体目录不存在：{font_dir}"))
+    elif missing_fonts:
+        checks.append(
+            _doctor_check(
+                "中文字体",
+                "WARN",
+                "以下配置字体未在本机检测到："
+                + ", ".join(str(font) for font in missing_fonts),
+            )
+        )
+    elif all(configured_fonts):
+        checks.append(
+            _doctor_check(
+                "中文字体",
+                "PASS",
+                f"{config.fonts.main} / {config.fonts.sans} / {config.fonts.mono}",
+            )
+        )
+    else:
+        checks.append(_doctor_check("中文字体", "WARN", "未配置完整 CJK 字体"))
+
+    if not config.compilation.enabled:
+        checks.append(_doctor_check("LaTeX 编译", "WARN", "配置中已关闭 compilation.enabled"))
+    else:
+        compiler = _arxiv_zh_compiler_from_config(config)
+        env = compiler._build_env()
+        tinytex_paths = compiler._resolve_tinytex_paths()
+        if config.compilation.use_tinytex:
+            if tinytex_paths:
+                checks.append(
+                    _doctor_check(
+                        "TinyTeX 路径",
+                        "PASS",
+                        ", ".join(str(path) for path in tinytex_paths),
+                    )
+                )
+            else:
+                checks.append(
+                    _doctor_check(
+                        "TinyTeX 路径",
+                        "WARN",
+                        "未找到常见 TinyTeX 路径，将依赖系统 PATH",
+                    )
+                )
+
+        latexmk = compiler._which("latexmk", env)
+        if config.compilation.prefer_latexmk:
+            checks.append(
+                _doctor_check(
+                    "latexmk",
+                    "PASS" if latexmk else "WARN",
+                    latexmk or "未找到；会尝试直接调用 LaTeX 引擎",
+                )
+            )
+
+        requested_engines = (
+            [config.compilation.engine_policy]
+            if config.compilation.engine_policy != "auto"
+            else list(config.compilation.fallback_engines)
+        )
+        available_engines = [
+            engine
+            for engine in requested_engines
+            if engine != "pdflatex" or config.compilation.allow_pdflatex_cjk
+            if compiler._which(engine, env)
+        ]
+        checks.append(
+            _doctor_check(
+                "LaTeX 引擎",
+                "PASS" if available_engines else "FAIL",
+                ", ".join(available_engines)
+                if available_engines
+                else "未找到可用的 xelatex/lualatex",
+            )
+        )
+
+        if config.compilation.install_missing_packages:
+            tlmgr = compiler._which("tlmgr", env)
+            checks.append(
+                _doctor_check(
+                    "tlmgr",
+                    "PASS" if tlmgr else "WARN",
+                    tlmgr or "未找到；TinyTeX 缺包自动安装将不可用",
+                )
+            )
+
+    ok, detail = _probe_arxiv_reachable()
+    checks.append(
+        _doctor_check(
+            "arXiv 网络",
+            "PASS" if ok else "FAIL",
+            detail,
+        )
+    )
+
+    return checks
+
+
+def _print_arxiv_zh_doctor_report(checks: list[ArxivZhDoctorCheck]) -> None:
+    table = Table(title="arxiv-zh 环境体检")
+    table.add_column("项目", style="cyan", no_wrap=True)
+    table.add_column("状态", no_wrap=True)
+    table.add_column("说明")
+
+    style_by_status = {
+        "PASS": "green",
+        "WARN": "yellow",
+        "FAIL": "red",
+    }
+    for check in checks:
+        style = style_by_status.get(check.status, "white")
+        table.add_row(check.name, f"[{style}]{check.status}[/{style}]", check.message)
+
+    console.print(table)
+
+
+def _run_arxiv_zh_doctor(config_path: Optional[Path]) -> bool:
+    checks = _collect_arxiv_zh_doctor_checks(config_path)
+    _print_arxiv_zh_doctor_report(checks)
+    return not any(check.status == "FAIL" for check in checks)
 
 
 def _resolve_cli_version() -> str:
@@ -1193,13 +1482,27 @@ def _run_arxiv_zh_pipeline(
 
 @zh_app.command()
 def arxiv_zh_root(
-    arxiv_id: str = typer.Argument(..., help="arXiv ID or URL"),
+    ctx: typer.Context,
+    arxiv_id: Optional[str] = typer.Argument(None, help="arXiv ID or URL"),
     config: Optional[Path] = typer.Option(
         None,
         "--config",
         help="Config YAML path. Defaults are used when omitted.",
     ),
+    doctor: bool = typer.Option(
+        False,
+        "--doctor",
+        help="Run environment checks and exit.",
+    ),
 ) -> None:
+    if doctor:
+        ok = _run_arxiv_zh_doctor(config)
+        raise typer.Exit(code=0 if ok else 1)
+
+    if not arxiv_id:
+        console.print(ctx.get_help())
+        raise typer.Exit(code=0)
+
     try:
         options, resolved_config = _resolve_arxiv_zh_options(
             arxiv_id=arxiv_id,
@@ -1301,68 +1604,6 @@ def glossary_add(
         yaml.dump(data, f, allow_unicode=True)
 
     console.print(f"[green]Added term:[/green] {term} -> {translation}")
-
-
-@app.command()
-def ping(
-    sdk: Optional[str] = typer.Option(
-        None,
-        help="SDK to use (openai, openai-coding, anthropic, anthropic-coding, bailian, or None for direct HTTP)",
-    ),
-    model: Optional[str] = typer.Option(None, help="Model name to use"),
-    key: Optional[str] = typer.Option(None, help="API Key"),
-    endpoint: Optional[str] = typer.Option(None, help="API endpoint URL"),
-):
-    """
-    Test LLM connectivity. Sends a minimal request to verify the configured LLM is reachable.
-    """
-    config = load_config()
-
-    sdk_name = sdk or config.llm.sdk
-    model_name = model or config.llm.get_model()
-    key_val = key or config.llm.key
-    endpoint_val = endpoint or config.llm.endpoint
-
-    _validate_provider_args(
-        sdk_name=sdk_name,
-        key_val=key_val,
-        endpoint_val=endpoint_val,
-    )
-
-    console.print(
-        Panel.fit(
-            f"[bold blue]arxiv-translate Ping[/bold blue]\n"
-            f"SDK: [green]{sdk_name or 'HTTP'}[/green]\n"
-            f"Model: [cyan]{model_name}[/cyan]\n"
-            f"Endpoint: [yellow]{endpoint_val or 'default'}[/yellow]",
-            title="Testing LLM Connectivity",
-        )
-    )
-
-    async def do_ping():
-        try:
-            provider = get_sdk_client(
-                sdk_name,
-                model=model_name,
-                key=key_val,
-                endpoint=endpoint_val,
-                temperature=config.llm.temperature,
-                max_tokens=config.llm.max_tokens,
-            )
-            start = time.perf_counter()
-            result = await provider.ping()
-            elapsed = time.perf_counter() - start
-
-            console.print(
-                f"\n[bold green]✅ 连通成功[/bold green]  "
-                f"耗时 [cyan]{elapsed:.2f}s[/cyan]\n"
-                f"  模型回复: [dim]{result[:120]}{'...' if len(result) > 120 else ''}[/dim]"
-            )
-        except Exception as e:
-            console.print(f"\n[bold red]❌ 连通失败[/bold red]\n  {e}")
-            raise typer.Exit(code=1)
-
-    asyncio.run(do_ping())
 
 
 @app.command()

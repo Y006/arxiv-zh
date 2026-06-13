@@ -201,6 +201,159 @@ def test_arxiv_zh_output_dir_sanitizes_old_style_id(monkeypatch, tmp_path: Path)
     assert options.output == tmp_path / "translated-output" / "arxiv-cs_9901001"
 
 
+def test_arxiv_zh_help_exposes_doctor_and_old_ping_is_removed():
+    import arxiv_translate.cli as cli_module
+
+    runner = CliRunner()
+
+    zh_result = runner.invoke(cli_module.zh_app, ["--help"])
+    assert zh_result.exit_code == 0
+    assert "--doctor" in zh_result.stdout
+
+    no_args_result = runner.invoke(cli_module.zh_app, [])
+    assert no_args_result.exit_code == 0
+    assert "--doctor" in no_args_result.stdout
+
+    old_result = runner.invoke(cli_module.app, ["--help"])
+    assert old_result.exit_code == 0
+    assert "ping" not in old_result.stdout
+
+    removed_result = runner.invoke(cli_module.app, ["ping"])
+    assert removed_result.exit_code != 0
+
+
+def test_arxiv_zh_doctor_collects_success(monkeypatch, tmp_path: Path):
+    import arxiv_translate.cli as cli_module
+
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    tinytex_bin = tmp_path / "TinyTeX" / "bin"
+    tinytex_bin.mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        llm:
+          models: deepseek-v4-flash
+          endpoint: https://api.deepseek.com
+        paths:
+          output_dir: ./translated-output
+        fonts:
+          dir: ./fonts
+          auto_detect: false
+          main: STSong
+          sans: STXihei
+          mono: STKaiti
+        compilation:
+          enabled: true
+        """,
+    )
+
+    class DummyProvider:
+        async def ping(self):
+            return "hi"
+
+    class DummyCompiler:
+        def __init__(self, **_kwargs):
+            pass
+
+        def _build_env(self):
+            return {"PATH": ""}
+
+        def _resolve_tinytex_paths(self):
+            return [tinytex_bin]
+
+        def _which(self, command, env=None):
+            _ = env
+            if command in {"latexmk", "xelatex", "lualatex", "tlmgr"}:
+                return f"/fake/{command}"
+            return None
+
+    def fake_get_sdk_client(sdk, *, model, key, endpoint, **_kwargs):
+        assert sdk == "deepseek"
+        assert model == "deepseek-v4-flash"
+        assert key == "sk-test"
+        assert endpoint == "https://api.deepseek.com"
+        return DummyProvider()
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_module, "LaTeXCompiler", DummyCompiler)
+    monkeypatch.setattr(cli_module, "get_sdk_client", fake_get_sdk_client)
+    monkeypatch.setattr(
+        cli_module,
+        "get_available_fonts",
+        lambda font_dir=None, include_system=True: ["STSong", "STXihei", "STKaiti"],
+    )
+    monkeypatch.setattr(cli_module, "_probe_arxiv_reachable", lambda: (True, "HTTP 200"))
+
+    checks = cli_module._collect_arxiv_zh_doctor_checks(config_path)
+
+    assert not [check for check in checks if check.status == "FAIL"]
+    assert any(
+        check.name == "DeepSeek 连通性" and check.status == "PASS"
+        for check in checks
+    )
+    assert any(check.name == "LaTeX 引擎" and check.status == "PASS" for check in checks)
+
+
+def test_arxiv_zh_doctor_reports_missing_key_without_ping(monkeypatch, tmp_path: Path):
+    import arxiv_translate.cli as cli_module
+
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        paths:
+          output_dir: ./translated-output
+        fonts:
+          auto_detect: false
+          main: STSong
+          sans: STXihei
+          mono: STKaiti
+        compilation:
+          enabled: false
+        """,
+    )
+
+    def fail_get_sdk_client(*_args, **_kwargs):
+        raise AssertionError("LLM ping should be skipped when API key is missing")
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(cli_module, "_arxiv_zh_dotenv_paths", lambda: [])
+    monkeypatch.setattr(cli_module, "get_sdk_client", fail_get_sdk_client)
+    monkeypatch.setattr(
+        cli_module,
+        "get_available_fonts",
+        lambda font_dir=None, include_system=True: ["STSong", "STXihei", "STKaiti"],
+    )
+    monkeypatch.setattr(cli_module, "_probe_arxiv_reachable", lambda: (True, "HTTP 200"))
+
+    checks = cli_module._collect_arxiv_zh_doctor_checks(config_path)
+
+    assert any(check.name == "API Key" and check.status == "FAIL" for check in checks)
+    assert any(
+        check.name == "DeepSeek 连通性" and check.status == "WARN"
+        for check in checks
+    )
+
+
+def test_arxiv_zh_doctor_cli_uses_exit_status(monkeypatch):
+    import arxiv_translate.cli as cli_module
+
+    runner = CliRunner()
+    monkeypatch.setattr(
+        cli_module,
+        "_collect_arxiv_zh_doctor_checks",
+        lambda config: [
+            cli_module.ArxivZhDoctorCheck("配置文件", "PASS", str(config)),
+            cli_module.ArxivZhDoctorCheck("API Key", "FAIL", "missing"),
+        ],
+    )
+
+    result = runner.invoke(cli_module.zh_app, ["--doctor", "--config", "config.yaml"])
+
+    assert result.exit_code == 1
+    assert "API Key" in result.stdout
+
+
 def test_arxiv_zh_rejects_non_deepseek_config(monkeypatch, tmp_path: Path):
     import arxiv_translate.cli as cli_module
 

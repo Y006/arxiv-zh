@@ -13,6 +13,7 @@ cp .env.example .env
 # 编辑 .env，填入 DEEPSEEK_API_KEY
 cp config.example.yaml config.yaml
 
+uv run arxiv-zh --doctor --config config.yaml
 uv run arxiv-zh 2501.12345 --config config.yaml
 ```
 
@@ -83,6 +84,7 @@ src/arxiv_translate/
 ## 验证
 
 ```bash
+uv run arxiv-zh --doctor --config config.yaml
 uv run --extra dev pytest
 uv run arxiv-zh --help
 ```

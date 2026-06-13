@@ -15,6 +15,7 @@ cp config.example.yaml config.yaml
 
 uv run arxiv-zh --doctor --config config.yaml
 uv run arxiv-zh 2501.12345 --config config.yaml
+uv run arxiv-zh 2501.12345 --compile-only --config config.yaml
 ```
 
 主入口是 `arxiv-zh`。`arx` 和 `arxiv-translate` 仍作为上游兼容入口保留。
@@ -36,6 +37,8 @@ uv run arxiv-zh 2501.12345 --config config.yaml
 │ --config        PATH  Config YAML path. Defaults are used when    │
 │                       omitted.                                    │
 │ --doctor              Run environment checks and exit.            │
+│ --compile-only        Compile existing translated/main_zh.tex and │
+│                       exit.                                       │
 │ --help                Show this message and exit.                 │
 ╰───────────────────────────────────────────────────────────────────╯
 
@@ -53,8 +56,13 @@ output/arxiv-<arxiv_id>/
 ├── logs/translate.log
 ├── logs/compile.log
 ├── logs/compile_attempts.json
-└── translation_report.md
+└── metadata.json
 ```
+
+`metadata.json` 记录两类信息：
+
+- `arxiv`：规范化后的 arXiv ID、base ID、版本、输入来源和输出目录，用于避免同一篇文章被不同 URL 识别成多个目录。
+- `run`：`download`、`translation`、`compilation` 三个阶段的状态。普通重跑会跳过已完成阶段；编译失败后可用 `--compile-only` 只重试编译。
 
 ## 配置
 

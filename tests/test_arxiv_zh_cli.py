@@ -1,5 +1,7 @@
+import json
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -24,6 +26,7 @@ def test_prepare_arxiv_zh_output_dirs_creates_expected_layout(tmp_path: Path):
     assert layout.cache_dir == tmp_path / "paper" / "cache"
     assert layout.logs_dir == tmp_path / "paper" / "logs"
     assert layout.translate_log == tmp_path / "paper" / "logs" / "translate.log"
+    assert layout.metadata == tmp_path / "paper" / "metadata.json"
     for path in (
         layout.source_dir,
         layout.translated_dir,
@@ -179,6 +182,46 @@ def test_arxiv_zh_output_dir_uses_parsed_id_for_url(monkeypatch, tmp_path: Path)
     assert options.output == tmp_path / "translated-output" / "arxiv-2410.24164v1"
 
 
+def test_arxiv_zh_output_dir_reuses_existing_metadata_for_same_paper(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import arxiv_translate.cli as cli_module
+
+    output_root = tmp_path / "translated-output"
+    existing_output = output_root / "arxiv-2410.24164v1"
+    existing_output.mkdir(parents=True)
+    (existing_output / "metadata.json").write_text(
+        json.dumps(
+            {
+                "arxiv": {
+                    "id": "2410.24164v1",
+                    "base_id": "2410.24164",
+                    "version": "v1",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        paths:
+          output_dir: ./translated-output
+        fonts:
+          auto_detect: false
+        """,
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+
+    options, _config = cli_module._resolve_arxiv_zh_options(
+        arxiv_id="https://arxiv.org/abs/2410.24164",
+        config=config_path,
+    )
+
+    assert options.output == existing_output
+
+
 def test_arxiv_zh_output_dir_sanitizes_old_style_id(monkeypatch, tmp_path: Path):
     import arxiv_translate.cli as cli_module
 
@@ -209,6 +252,7 @@ def test_arxiv_zh_help_exposes_doctor_and_old_ping_is_removed():
     zh_result = runner.invoke(cli_module.zh_app, ["--help"])
     assert zh_result.exit_code == 0
     assert "--doctor" in zh_result.stdout
+    assert "--compile-only" in zh_result.stdout
 
     no_args_result = runner.invoke(cli_module.zh_app, [])
     assert no_args_result.exit_code == 0
@@ -220,6 +264,169 @@ def test_arxiv_zh_help_exposes_doctor_and_old_ping_is_removed():
 
     removed_result = runner.invoke(cli_module.app, ["ping"])
     assert removed_result.exit_code != 0
+
+
+def test_arxiv_zh_compile_only_compiles_existing_translation_without_key(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import arxiv_translate.cli as cli_module
+
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        paths:
+          output_dir: ./translated-output
+        fonts:
+          auto_detect: false
+        compilation:
+          enabled: false
+        """,
+    )
+    translated_dir = tmp_path / "translated-output" / "arxiv-2410.24164v1" / "translated"
+    translated_dir.mkdir(parents=True)
+    translated_tex = translated_dir / "main_zh.tex"
+    translated_tex.write_text(
+        "\\documentclass{article}\\begin{document}中文\\end{document}",
+        encoding="utf-8",
+    )
+
+    class DummyCompiler:
+        def __init__(self, **_kwargs):
+            pass
+
+        def compile_file(self, tex_file, output_path, **_kwargs):
+            assert tex_file == translated_tex
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"%PDF-1.5\n%%EOF\n")
+            return SimpleNamespace(
+                success=True,
+                pdf_path=output_path,
+                engine_used="xelatex",
+                diagnostic_path=tmp_path / "attempts.json",
+                repaired_tex_path=None,
+            )
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(cli_module, "_arxiv_zh_dotenv_paths", lambda: [])
+    monkeypatch.setattr(cli_module, "LaTeXCompiler", DummyCompiler)
+
+    options, config = cli_module._resolve_arxiv_zh_options(
+        arxiv_id="2410.24164v1",
+        config=config_path,
+        require_api_key=False,
+    )
+    cli_module._run_arxiv_zh_compile_only(
+        arxiv_id="2410.24164v1",
+        options=options,
+        config=config,
+    )
+
+    metadata = json.loads(
+        (tmp_path / "translated-output" / "arxiv-2410.24164v1" / "metadata.json")
+        .read_text(encoding="utf-8")
+    )
+    assert metadata["arxiv"]["id"] == "2410.24164v1"
+    assert metadata["run"]["translation"]["status"] == "completed"
+    assert metadata["run"]["translation"]["status_source"] == "existing_file"
+    assert metadata["run"]["compilation"]["status"] == "completed"
+    assert metadata["run"]["compilation"]["completed"] is True
+
+
+def test_arxiv_zh_pipeline_skips_download_and_translation_when_metadata_complete(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import arxiv_translate.cli as cli_module
+
+    output_dir = tmp_path / "translated-output" / "arxiv-2410.24164v1"
+    translated_dir = output_dir / "translated"
+    translated_dir.mkdir(parents=True)
+    translated_tex = translated_dir / "main_zh.tex"
+    translated_tex.write_text(
+        "\\documentclass{article}\\begin{document}中文\\end{document}",
+        encoding="utf-8",
+    )
+    (output_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "arxiv": {
+                    "id": "2410.24164v1",
+                    "base_id": "2410.24164",
+                    "version": "v1",
+                },
+                "run": {
+                    "download": {"status": "completed", "completed": True},
+                    "translation": {
+                        "status": "completed",
+                        "completed": True,
+                        "translated_tex": str(translated_tex),
+                    },
+                    "compilation": {"status": "failed", "completed": False},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        paths:
+          output_dir: ./translated-output
+        fonts:
+          auto_detect: false
+        compilation:
+          enabled: true
+        """,
+    )
+
+    class DummyCompiler:
+        def __init__(self, **_kwargs):
+            pass
+
+        def compile_file(self, tex_file, output_path, **_kwargs):
+            assert tex_file == translated_tex
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"%PDF-1.5\n%%EOF\n")
+            return SimpleNamespace(
+                success=True,
+                pdf_path=output_path,
+                engine_used="xelatex",
+                diagnostic_path=None,
+                repaired_tex_path=None,
+            )
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_module, "LaTeXCompiler", DummyCompiler)
+    monkeypatch.setattr(
+        cli_module.ArxivDownloader,
+        "download",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("download should be skipped")
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "get_sdk_client",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("translation should be skipped")
+        ),
+    )
+
+    options, config = cli_module._resolve_arxiv_zh_options(
+        arxiv_id="2410.24164v1",
+        config=config_path,
+    )
+    cli_module._run_arxiv_zh_pipeline(
+        arxiv_id="2410.24164v1",
+        options=options,
+        config=config,
+    )
+
+    metadata = json.loads((output_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["run"]["compilation"]["status"] == "completed"
+    assert metadata["run"]["status"] == "success"
 
 
 def test_arxiv_zh_doctor_collects_success(monkeypatch, tmp_path: Path):

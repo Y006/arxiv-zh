@@ -1,8 +1,11 @@
 import asyncio
 import importlib.metadata as metadata
+import json
+import re
 import shutil
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -27,7 +30,7 @@ from arxiv_translate.compiler.chinese_support import (
     find_font_files,
     get_available_fonts,
 )
-from arxiv_translate.downloader.arxiv import ArxivDownloader
+from arxiv_translate.downloader.arxiv import ArxivDownloader, DownloadResult
 from arxiv_translate.parser.latex_parser import LaTeXParser
 from arxiv_translate.rules.config import Config, deep_merge, load_config, load_defaults
 from arxiv_translate.rules.env import get_env_value
@@ -73,7 +76,7 @@ class ArxivZhOutputLayout:
     logs_dir: Path
     translate_log: Path
     compile_log: Path
-    report: Path
+    metadata: Path
 
 
 @dataclass
@@ -112,7 +115,7 @@ def _prepare_arxiv_zh_output_dirs(output: Path) -> ArxivZhOutputLayout:
         logs_dir=root / "logs",
         translate_log=root / "logs" / "translate.log",
         compile_log=root / "logs" / "compile.log",
-        report=root / "translation_report.md",
+        metadata=root / "metadata.json",
     )
     for path in (
         layout.source_dir,
@@ -159,9 +162,113 @@ def _resolve_arxiv_zh_api_key(config: Config) -> tuple[Optional[str], str]:
     return api_key, api_key_env
 
 
+def _split_arxiv_id_version(arxiv_id: str) -> tuple[str, Optional[str]]:
+    match = re.match(r"^(?P<base>\d{4}\.\d{4,5})(?P<version>v\d+)?$", arxiv_id)
+    if match:
+        return match.group("base"), match.group("version")
+    return arxiv_id, None
+
+
 def _arxiv_zh_output_dir_name(arxiv_id_or_url: str) -> str:
     parsed_id = ArxivDownloader.parse_id(arxiv_id_or_url)
     return f"arxiv-{parsed_id.replace('/', '_')}"
+
+
+def _arxiv_zh_metadata_path(output_dir: Path) -> Path:
+    return output_dir / "metadata.json"
+
+
+def _load_json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _metadata_arxiv_identity(
+    metadata_data: dict[str, Any],
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    arxiv_data = metadata_data.get("arxiv")
+    if not isinstance(arxiv_data, dict):
+        return None, None, None
+    arxiv_id = arxiv_data.get("id")
+    base_id = arxiv_data.get("base_id")
+    version = arxiv_data.get("version")
+    return (
+        str(arxiv_id) if arxiv_id else None,
+        str(base_id) if base_id else None,
+        str(version) if version else None,
+    )
+
+
+def _arxiv_identity_compatible(
+    *,
+    requested_id: str,
+    existing_id: Optional[str],
+    existing_base_id: Optional[str],
+    existing_version: Optional[str],
+) -> bool:
+    if existing_id == requested_id:
+        return True
+
+    requested_base_id, requested_version = _split_arxiv_id_version(requested_id)
+    if existing_base_id != requested_base_id:
+        return False
+
+    return requested_version is None or existing_version is None
+
+
+def _find_existing_arxiv_zh_output_dir(
+    output_root: Path,
+    parsed_id: str,
+) -> Optional[Path]:
+    if not output_root.exists():
+        return None
+
+    exact_dir = output_root / _arxiv_zh_output_dir_name(parsed_id)
+    if exact_dir.exists():
+        return exact_dir
+
+    for candidate in sorted(output_root.glob("arxiv-*")):
+        if not candidate.is_dir():
+            continue
+        metadata_data = _load_json_file(_arxiv_zh_metadata_path(candidate))
+        existing_id, existing_base_id, existing_version = _metadata_arxiv_identity(
+            metadata_data
+        )
+        if _arxiv_identity_compatible(
+            requested_id=parsed_id,
+            existing_id=existing_id,
+            existing_base_id=existing_base_id,
+            existing_version=existing_version,
+        ):
+            return candidate
+
+        candidate_id = candidate.name.removeprefix("arxiv-").replace("_", "/")
+        candidate_base_id, candidate_version = _split_arxiv_id_version(candidate_id)
+        if _arxiv_identity_compatible(
+            requested_id=parsed_id,
+            existing_id=candidate_id,
+            existing_base_id=candidate_base_id,
+            existing_version=candidate_version,
+        ):
+            return candidate
+
+    return None
+
+
+def _resolve_arxiv_zh_output_dir(
+    *,
+    arxiv_id_or_url: str,
+    output_root: Path,
+) -> Path:
+    parsed_id = ArxivDownloader.parse_id(arxiv_id_or_url)
+    existing = _find_existing_arxiv_zh_output_dir(output_root, parsed_id)
+    if existing is not None:
+        return existing
+    return output_root / _arxiv_zh_output_dir_name(parsed_id)
 
 
 def _load_config_for_arxiv_zh(config_path: Optional[Path]) -> Config:
@@ -212,6 +319,7 @@ def _resolve_arxiv_zh_options(
     *,
     arxiv_id: str,
     config: Optional[Path],
+    require_api_key: bool = True,
 ) -> tuple[ArxivZhOptions, Config]:
     resolved_config = _load_config_for_arxiv_zh(config)
 
@@ -219,20 +327,23 @@ def _resolve_arxiv_zh_options(
         raise ValueError("arxiv-zh only supports llm.sdk: deepseek in config.")
 
     api_key, api_key_env = _resolve_arxiv_zh_api_key(resolved_config)
-    if not api_key:
+    if require_api_key and not api_key:
         raise ValueError(
             f"{api_key_env} is required. Export it, put it in .env, or set "
             "llm.key in the config before running arxiv-zh."
         )
 
     output_root = _resolve_path_from_config(resolved_config.paths.output_dir, config)
-    output = output_root / _arxiv_zh_output_dir_name(arxiv_id)
+    output = _resolve_arxiv_zh_output_dir(
+        arxiv_id_or_url=arxiv_id,
+        output_root=output_root,
+    )
 
     options = ArxivZhOptions(
         output=output,
         config=config,
         concurrency=resolved_config.translation.concurrency,
-        api_key=api_key,
+        api_key=api_key or "",
         model=resolved_config.llm.get_model(),
         endpoint=resolved_config.llm.endpoint or "https://api.deepseek.com",
         compile_pdf=resolved_config.compilation.enabled,
@@ -250,37 +361,313 @@ def _copy_source_tree_to_translated(source_dir: Path, translated_dir: Path) -> N
             shutil.copy2(item, target)
 
 
-def _write_arxiv_zh_report(
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _arxiv_zh_stage(status: str = "pending") -> dict[str, Any]:
+    return {
+        "status": status,
+        "completed": status == "completed",
+        "started_at": None,
+        "completed_at": None,
+        "error": None,
+    }
+
+
+def _arxiv_zh_metadata_template(
+    *,
+    arxiv_input: str,
+    arxiv_id: str,
+    layout: ArxivZhOutputLayout,
+) -> dict[str, Any]:
+    base_id, version = _split_arxiv_id_version(arxiv_id)
+    return {
+        "schema_version": 1,
+        "arxiv": {
+            "id": arxiv_id,
+            "base_id": base_id,
+            "version": version,
+            "input": arxiv_input,
+            "last_input": arxiv_input,
+            "abs_url": f"https://arxiv.org/abs/{arxiv_id}",
+            "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}",
+            "source_url": f"https://arxiv.org/e-print/{arxiv_id}",
+            "output_dir": str(layout.root),
+            "output_dir_name": layout.root.name,
+        },
+        "run": {
+            "status": "pending",
+            "created_at": _utc_now_iso(),
+            "updated_at": _utc_now_iso(),
+            "download": _arxiv_zh_stage(),
+            "translation": _arxiv_zh_stage(),
+            "compilation": _arxiv_zh_stage(),
+        },
+    }
+
+
+def _load_arxiv_zh_metadata(layout: ArxivZhOutputLayout) -> dict[str, Any]:
+    return _load_json_file(layout.metadata)
+
+
+def _write_arxiv_zh_metadata(
+    layout: ArxivZhOutputLayout,
+    metadata_data: dict[str, Any],
+) -> None:
+    metadata_data.setdefault("schema_version", 1)
+    run_data = metadata_data.setdefault("run", {})
+    run_data["updated_at"] = _utc_now_iso()
+    layout.metadata.write_text(
+        json.dumps(metadata_data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _ensure_arxiv_zh_metadata(
     layout: ArxivZhOutputLayout,
     *,
+    arxiv_input: str,
     arxiv_id: str,
-    status: str,
-    translated_chunks: int,
-    total_chunks: int,
-    pdf_path: Optional[Path] = None,
-    error: Optional[str] = None,
-) -> None:
-    lines = [
-        "# Translation Report",
-        "",
-        f"- arXiv ID: `{arxiv_id}`",
-        f"- Status: `{status}`",
-        f"- Translated chunks: `{translated_chunks}/{total_chunks}`",
-        f"- Output root: `{layout.root}`",
-        f"- Translated TeX: `{layout.translated_dir / 'main_zh.tex'}`",
-    ]
-    if pdf_path:
-        lines.append(f"- PDF: `{pdf_path}`")
-    if error:
-        lines.append(f"- Error: `{error}`")
-    lines.extend(
-        [
-            f"- Translate log: `{layout.translate_log}`",
-            f"- Compile log: `{layout.compile_log}`",
-            "",
-        ]
+) -> dict[str, Any]:
+    metadata_data = _load_arxiv_zh_metadata(layout)
+    if not metadata_data:
+        root_id = layout.root.name.removeprefix("arxiv-").replace("_", "/")
+        root_base_id, root_version = _split_arxiv_id_version(root_id)
+        if _arxiv_identity_compatible(
+            requested_id=arxiv_id,
+            existing_id=root_id,
+            existing_base_id=root_base_id,
+            existing_version=root_version,
+        ):
+            arxiv_id = root_id
+        metadata_data = _arxiv_zh_metadata_template(
+            arxiv_input=arxiv_input,
+            arxiv_id=arxiv_id,
+            layout=layout,
+        )
+        _write_arxiv_zh_metadata(layout, metadata_data)
+        return metadata_data
+
+    existing_id, existing_base_id, existing_version = _metadata_arxiv_identity(
+        metadata_data
     )
-    layout.report.write_text("\n".join(lines), encoding="utf-8")
+    if not _arxiv_identity_compatible(
+        requested_id=arxiv_id,
+        existing_id=existing_id,
+        existing_base_id=existing_base_id,
+        existing_version=existing_version,
+    ):
+        raise ValueError(
+            "Existing metadata belongs to a different arXiv paper: "
+            f"{existing_id or 'unknown'}"
+        )
+
+    metadata_data.setdefault("schema_version", 1)
+    arxiv_data = metadata_data.setdefault("arxiv", {})
+    arxiv_data.setdefault("id", arxiv_id)
+    base_id, version = _split_arxiv_id_version(str(arxiv_data.get("id") or arxiv_id))
+    arxiv_data.setdefault("base_id", base_id)
+    arxiv_data.setdefault("version", version)
+    arxiv_data.setdefault("input", arxiv_input)
+    arxiv_data["last_input"] = arxiv_input
+    arxiv_data["output_dir"] = str(layout.root)
+    arxiv_data["output_dir_name"] = layout.root.name
+    run_data = metadata_data.setdefault("run", {})
+    run_data.setdefault("status", "pending")
+    run_data.setdefault("created_at", _utc_now_iso())
+    for stage in ("download", "translation", "compilation"):
+        run_data.setdefault(stage, _arxiv_zh_stage())
+    _write_arxiv_zh_metadata(layout, metadata_data)
+    return metadata_data
+
+
+def _metadata_stage(metadata_data: dict[str, Any], stage: str) -> dict[str, Any]:
+    run_data = metadata_data.setdefault("run", {})
+    return run_data.setdefault(stage, _arxiv_zh_stage())
+
+
+def _metadata_stage_completed(metadata_data: dict[str, Any], stage: str) -> bool:
+    stage_data = _metadata_stage(metadata_data, stage)
+    return bool(stage_data.get("completed")) and stage_data.get("status") == "completed"
+
+
+def _set_metadata_stage_status(
+    metadata_data: dict[str, Any],
+    stage: str,
+    status: str,
+    **fields: Any,
+) -> None:
+    stage_data = _metadata_stage(metadata_data, stage)
+    stage_data["status"] = status
+    stage_data["completed"] = status == "completed"
+    if status == "running":
+        stage_data["started_at"] = _utc_now_iso()
+        stage_data["error"] = None
+    if status in {"completed", "failed", "skipped"}:
+        stage_data["completed_at"] = _utc_now_iso()
+    if status == "completed":
+        stage_data["error"] = None
+    if status == "failed" and "error" not in fields:
+        stage_data["error"] = "unknown"
+    stage_data.update(fields)
+
+
+def _set_metadata_run_status(metadata_data: dict[str, Any], status: str) -> None:
+    metadata_data.setdefault("run", {})["status"] = status
+
+
+def _existing_source_download_result(
+    layout: ArxivZhOutputLayout,
+    metadata_data: dict[str, Any],
+) -> Optional[DownloadResult]:
+    if not _metadata_stage_completed(metadata_data, "download"):
+        return None
+    if not layout.source_dir.exists():
+        return None
+
+    files = [path for path in layout.source_dir.rglob("*") if path.is_file()]
+    if not files:
+        return None
+
+    main_tex_value = _metadata_stage(metadata_data, "download").get("main_tex")
+    main_tex = Path(str(main_tex_value)) if main_tex_value else None
+    if main_tex is None or not main_tex.exists():
+        try:
+            main_tex = ArxivDownloader(
+                cache_dir=layout.cache_dir / "downloads"
+            ).find_main_tex(files)
+        except Exception:
+            return None
+
+    arxiv_data = metadata_data.get("arxiv", {})
+    arxiv_id = str(arxiv_data.get("id") or layout.root.name.removeprefix("arxiv-"))
+    return DownloadResult(
+        arxiv_id=arxiv_id,
+        source_dir=layout.source_dir,
+        main_tex=main_tex,
+        downloaded_files=files,
+    )
+
+
+def _mark_existing_translation_if_present(
+    layout: ArxivZhOutputLayout,
+    metadata_data: dict[str, Any],
+) -> None:
+    translated_tex = layout.translated_dir / "main_zh.tex"
+    if translated_tex.exists() and not _metadata_stage_completed(
+        metadata_data,
+        "translation",
+    ):
+        _set_metadata_stage_status(
+            metadata_data,
+            "translation",
+            "completed",
+            translated_tex=str(translated_tex),
+            status_source="existing_file",
+        )
+
+
+def _compile_arxiv_zh_translated_tex(
+    *,
+    layout: ArxivZhOutputLayout,
+    config: Config,
+    metadata_data: dict[str, Any],
+) -> Optional[Path]:
+    translated_tex_path = layout.translated_dir / "main_zh.tex"
+    if not translated_tex_path.exists():
+        _set_metadata_stage_status(
+            metadata_data,
+            "compilation",
+            "failed",
+            error=f"Translated TeX not found: {translated_tex_path}",
+        )
+        _set_metadata_run_status(metadata_data, "compile_failed")
+        _write_arxiv_zh_metadata(layout, metadata_data)
+        raise ValueError(f"Translated TeX not found: {translated_tex_path}")
+
+    _set_metadata_stage_status(
+        metadata_data,
+        "compilation",
+        "running",
+        translated_tex=str(translated_tex_path),
+    )
+    _write_arxiv_zh_metadata(layout, metadata_data)
+
+    compiler = _arxiv_zh_compiler_from_config(config)
+    result = compiler.compile_file(
+        translated_tex_path,
+        layout.pdf_dir / "main_zh.pdf",
+        logs_dir=layout.logs_dir,
+        build_dir=layout.root / "build",
+        prefer_latexmk=config.compilation.prefer_latexmk,
+        engine_policy=config.compilation.engine_policy,
+        fallback_engines=config.compilation.fallback_engines,
+        allow_pdflatex_cjk=config.compilation.allow_pdflatex_cjk,
+        allow_shell_escape=config.compilation.allow_shell_escape,
+        max_repair_rounds=config.compilation.max_repair_rounds,
+        chinese_package=config.compilation.chinese_package,
+        font_config=config.fonts,
+    )
+    if not result.success:
+        error = result.error_message or "Compilation failed"
+        _set_metadata_stage_status(
+            metadata_data,
+            "compilation",
+            "failed",
+            error=error,
+            attempts_path=str(result.diagnostic_path) if result.diagnostic_path else None,
+        )
+        _set_metadata_run_status(metadata_data, "compile_failed")
+        _write_arxiv_zh_metadata(layout, metadata_data)
+        raise RuntimeError(error)
+
+    pdf_path = result.pdf_path
+    _set_metadata_stage_status(
+        metadata_data,
+        "compilation",
+        "completed",
+        pdf_path=str(pdf_path) if pdf_path else None,
+        engine_used=result.engine_used,
+        attempts_path=str(result.diagnostic_path) if result.diagnostic_path else None,
+        repaired_tex_path=(
+            str(result.repaired_tex_path) if result.repaired_tex_path else None
+        ),
+    )
+    _set_metadata_run_status(metadata_data, "success")
+    _write_arxiv_zh_metadata(layout, metadata_data)
+    return pdf_path
+
+
+def _run_arxiv_zh_compile_only(
+    *,
+    arxiv_id: str,
+    options: ArxivZhOptions,
+    config: Config,
+) -> None:
+    layout = _prepare_arxiv_zh_output_dirs(options.output)
+    parsed_id = ArxivDownloader.parse_id(arxiv_id)
+    metadata_data = _ensure_arxiv_zh_metadata(
+        layout,
+        arxiv_input=arxiv_id,
+        arxiv_id=parsed_id,
+    )
+    _mark_existing_translation_if_present(layout, metadata_data)
+
+    if not _metadata_stage_completed(metadata_data, "translation"):
+        raise ValueError(
+            "Cannot compile only before translation is completed. "
+            f"Missing metadata state for {layout.translated_dir / 'main_zh.tex'}."
+        )
+
+    layout.translate_log.parent.mkdir(parents=True, exist_ok=True)
+    _append_text_log(layout.translate_log, f"Starting compile-only job for {arxiv_id}")
+    _compile_arxiv_zh_translated_tex(
+        layout=layout,
+        config=config,
+        metadata_data=metadata_data,
+    )
+    _append_text_log(layout.translate_log, "Compile-only job completed")
 
 
 def _arxiv_zh_compiler_from_config(config: Config) -> LaTeXCompiler:
@@ -1248,8 +1635,50 @@ def _run_arxiv_zh_pipeline(
     config: Config,
 ) -> None:
     layout = _prepare_arxiv_zh_output_dirs(options.output)
+    parsed_id = ArxivDownloader.parse_id(arxiv_id)
+    metadata_data = _ensure_arxiv_zh_metadata(
+        layout,
+        arxiv_input=arxiv_id,
+        arxiv_id=parsed_id,
+    )
+    _mark_existing_translation_if_present(layout, metadata_data)
     layout.translate_log.write_text("", encoding="utf-8")
     _append_text_log(layout.translate_log, f"Starting arxiv-zh job for {arxiv_id}")
+
+    if _metadata_stage_completed(metadata_data, "compilation"):
+        pdf_path = _metadata_stage(metadata_data, "compilation").get("pdf_path")
+        if pdf_path and Path(str(pdf_path)).exists():
+            _append_text_log(
+                layout.translate_log,
+                f"Compilation already completed; skipping: {pdf_path}",
+            )
+            _set_metadata_run_status(metadata_data, "success")
+            _write_arxiv_zh_metadata(layout, metadata_data)
+            return
+
+    if _metadata_stage_completed(metadata_data, "translation"):
+        translated_tex = layout.translated_dir / "main_zh.tex"
+        if translated_tex.exists():
+            _append_text_log(
+                layout.translate_log,
+                "Translation already completed; skipping download and translation",
+            )
+            if options.compile_pdf:
+                _compile_arxiv_zh_translated_tex(
+                    layout=layout,
+                    config=config,
+                    metadata_data=metadata_data,
+                )
+            else:
+                _set_metadata_stage_status(
+                    metadata_data,
+                    "compilation",
+                    "skipped",
+                    reason="compilation.disabled",
+                )
+                _set_metadata_run_status(metadata_data, "success")
+                _write_arxiv_zh_metadata(layout, metadata_data)
+            return
 
     async def run_pipeline() -> None:
         local_cache: Optional[LocalTranslationCache] = None
@@ -1262,17 +1691,40 @@ def _run_arxiv_zh_pipeline(
             config.paths.cache_dir = str(layout.cache_dir)
             config.cache.enabled = True
 
-            _append_text_log(layout.translate_log, "Downloading source")
-            downloader = ArxivDownloader(cache_dir=layout.cache_dir / "downloads")
-            download_result = downloader.download(
-                arxiv_id,
-                layout.root,
-                extract_dir=layout.source_dir,
-            )
-            _append_text_log(
-                layout.translate_log,
-                f"Downloaded {download_result.arxiv_id} to {layout.source_dir}",
-            )
+            download_result = _existing_source_download_result(layout, metadata_data)
+            if download_result is not None:
+                _append_text_log(
+                    layout.translate_log,
+                    f"Download already completed; reusing {layout.source_dir}",
+                )
+            else:
+                _append_text_log(layout.translate_log, "Downloading source")
+                _set_metadata_stage_status(metadata_data, "download", "running")
+                _write_arxiv_zh_metadata(layout, metadata_data)
+                downloader = ArxivDownloader(cache_dir=layout.cache_dir / "downloads")
+                download_result = downloader.download(
+                    arxiv_id,
+                    layout.root,
+                    extract_dir=layout.source_dir,
+                )
+                _set_metadata_stage_status(
+                    metadata_data,
+                    "download",
+                    "completed",
+                    source_dir=str(layout.source_dir),
+                    main_tex=str(download_result.main_tex),
+                    archive_path=str(
+                        layout.cache_dir
+                        / "downloads"
+                        / f"{download_result.arxiv_id}.tar.gz"
+                    ),
+                    files_count=len(download_result.downloaded_files),
+                )
+                _write_arxiv_zh_metadata(layout, metadata_data)
+                _append_text_log(
+                    layout.translate_log,
+                    f"Downloaded {download_result.arxiv_id} to {layout.source_dir}",
+                )
 
             _append_text_log(layout.translate_log, "Parsing LaTeX")
             parser = LaTeXParser(
@@ -1333,6 +1785,13 @@ def _run_arxiv_zh_pipeline(
                 layout.translate_log,
                 f"Translating {len(chunk_data)} of {total_chunks} chunks",
             )
+            _set_metadata_stage_status(
+                metadata_data,
+                "translation",
+                "running",
+                total_chunks=total_chunks,
+            )
+            _write_arxiv_zh_metadata(layout, metadata_data)
 
             translated_chunks = await pipeline.translate_document(
                 chunks=chunk_data,
@@ -1392,6 +1851,17 @@ def _run_arxiv_zh_pipeline(
             _copy_source_tree_to_translated(layout.source_dir, layout.translated_dir)
             translated_tex_path = layout.translated_dir / "main_zh.tex"
             translated_tex_path.write_text(translated_tex, encoding="utf-8")
+            _set_metadata_stage_status(
+                metadata_data,
+                "translation",
+                "completed",
+                translated_tex=str(translated_tex_path),
+                translated_chunks=translated_count,
+                total_chunks=total_chunks,
+                parser_state=str(layout.cache_dir / "parser_state.json"),
+                translation_state=str(layout.cache_dir / "translation_state.json"),
+            )
+            _write_arxiv_zh_metadata(layout, metadata_data)
             _append_text_log(
                 layout.translate_log,
                 f"Wrote translated TeX to {translated_tex_path}",
@@ -1413,77 +1883,48 @@ def _run_arxiv_zh_pipeline(
                 f"Validation completed with {len(val_result.errors)} issue(s)",
             )
 
-            pdf_path: Optional[Path] = None
             if options.compile_pdf:
                 _append_text_log(layout.translate_log, "Compiling PDF")
-                compiler = LaTeXCompiler(
-                    timeout=config.compilation.timeout,
-                    fonts_dir=config.fonts.dir,
-                    use_tinytex=config.compilation.use_tinytex,
-                    tinytex_paths=config.compilation.tinytex_paths,
-                    install_missing_packages=config.compilation.install_missing_packages,
-                    install_timeout=config.compilation.install_timeout,
-                    max_package_install_rounds=(
-                        config.compilation.max_package_install_rounds
-                    ),
+                _compile_arxiv_zh_translated_tex(
+                    layout=layout,
+                    config=config,
+                    metadata_data=metadata_data,
                 )
-                result = compiler.compile_file(
-                    translated_tex_path,
-                    layout.pdf_dir / "main_zh.pdf",
-                    logs_dir=layout.logs_dir,
-                    build_dir=layout.root / "build",
-                    prefer_latexmk=config.compilation.prefer_latexmk,
-                    engine_policy=config.compilation.engine_policy,
-                    fallback_engines=config.compilation.fallback_engines,
-                    allow_pdflatex_cjk=config.compilation.allow_pdflatex_cjk,
-                    allow_shell_escape=config.compilation.allow_shell_escape,
-                    max_repair_rounds=config.compilation.max_repair_rounds,
-                    chinese_package=config.compilation.chinese_package,
-                    font_config=config.fonts,
+            else:
+                _set_metadata_stage_status(
+                    metadata_data,
+                    "compilation",
+                    "skipped",
+                    reason="compilation.disabled",
                 )
-                if not result.success:
-                    error = result.error_message or "Compilation failed"
-                    _write_arxiv_zh_report(
-                        layout,
-                        arxiv_id=download_result.arxiv_id,
-                        status="compile_failed",
-                        translated_chunks=translated_count,
-                        total_chunks=total_chunks,
-                        error=error,
-                    )
-                    raise RuntimeError(error)
-                pdf_path = result.pdf_path
+                _set_metadata_run_status(metadata_data, "success")
+                _write_arxiv_zh_metadata(layout, metadata_data)
 
-            _write_arxiv_zh_report(
-                layout,
-                arxiv_id=download_result.arxiv_id,
-                status="success",
-                translated_chunks=translated_count,
-                total_chunks=total_chunks,
-                pdf_path=pdf_path,
-            )
             _append_text_log(layout.translate_log, "Job completed")
 
         except Exception as exc:
             _append_text_log(layout.translate_log, f"Job failed: {exc}")
-            if download_result is not None:
-                _write_arxiv_zh_report(
-                    layout,
-                    arxiv_id=download_result.arxiv_id,
-                    status="failed",
-                    translated_chunks=translated_count,
-                    total_chunks=total_chunks,
+            if download_result is None:
+                _set_metadata_stage_status(
+                    metadata_data,
+                    "download",
+                    "failed",
                     error=str(exc),
                 )
+            elif not _metadata_stage_completed(metadata_data, "translation"):
+                _set_metadata_stage_status(
+                    metadata_data,
+                    "translation",
+                    "failed",
+                    error=str(exc),
+                    translated_chunks=translated_count,
+                    total_chunks=total_chunks,
+                )
+            if _metadata_stage(metadata_data, "compilation").get("status") == "failed":
+                _set_metadata_run_status(metadata_data, "compile_failed")
             else:
-                _write_arxiv_zh_report(
-                    layout,
-                    arxiv_id=arxiv_id,
-                    status="failed",
-                    translated_chunks=translated_count,
-                    total_chunks=total_chunks,
-                    error=str(exc),
-                )
+                _set_metadata_run_status(metadata_data, "failed")
+            _write_arxiv_zh_metadata(layout, metadata_data)
             raise
         finally:
             if local_cache is not None:
@@ -1509,6 +1950,11 @@ def arxiv_zh_root(
         "--doctor",
         help="Run environment checks and exit.",
     ),
+    compile_only: bool = typer.Option(
+        False,
+        "--compile-only",
+        help="Compile existing translated/main_zh.tex and exit.",
+    ),
 ) -> None:
     if doctor:
         ok = _run_arxiv_zh_doctor(config)
@@ -1522,12 +1968,20 @@ def arxiv_zh_root(
         options, resolved_config = _resolve_arxiv_zh_options(
             arxiv_id=arxiv_id,
             config=config,
+            require_api_key=not compile_only,
         )
-        _run_arxiv_zh_pipeline(
-            arxiv_id=arxiv_id,
-            options=options,
-            config=resolved_config,
-        )
+        if compile_only:
+            _run_arxiv_zh_compile_only(
+                arxiv_id=arxiv_id,
+                options=options,
+                config=resolved_config,
+            )
+        else:
+            _run_arxiv_zh_pipeline(
+                arxiv_id=arxiv_id,
+                options=options,
+                config=resolved_config,
+            )
     except ValueError as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(code=1)

@@ -66,8 +66,17 @@ logs/compile.log
 翻译不完整、英文残留或 LaTeX 结构异常时，优先查看：
 
 ```text
-translation_report.md
+metadata.json
+logs/translate.log
 ```
+
+`metadata.json` 中的 `run.download`、`run.translation`、`run.compilation` 会记录三个阶段是否完成。若翻译已完成但编译失败，优先使用：
+
+```bash
+uv run arxiv-zh <arxiv_id_or_url> --compile-only --config config.yaml
+```
+
+该命令只读取 `translated/main_zh.tex` 并重新编译，不应重新下载或重新翻译。
 
 常见审计信息含义：
 
@@ -98,6 +107,7 @@ agent 应优先自己运行 `--doctor`、读取配置和查看日志，不要把
 * 删除输出目录
 * 清理缓存
 * 重新编译
+* 使用 `--compile-only` 重新编译
 * 重新翻译
 
 涉及 API Key 时，只说明 `.env` 配置方法，不索要、不保存、不回显完整密钥。

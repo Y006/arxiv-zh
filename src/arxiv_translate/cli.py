@@ -32,10 +32,7 @@ from arxiv_translate.rules.config import Config, deep_merge, load_config, load_d
 from arxiv_translate.rules.env import get_env_value
 from arxiv_translate.rules.glossary import load_glossary
 from arxiv_translate.rules.examples import load_examples
-from arxiv_translate.rules.user_paths import (
-    ensure_config_dir,
-    migrate_legacy_files,
-)
+from arxiv_translate.rules.user_paths import ensure_config_dir
 from arxiv_translate.translator import get_sdk_client, should_use_ark_autoroute
 from arxiv_translate.translator.pipeline import TranslationPipeline, TranslatedChunk
 from arxiv_translate.translator.postprocess import sanitize_markdown_bold_safe
@@ -281,7 +278,7 @@ def _write_arxiv_zh_report(
 
 
 def _resolve_cli_version() -> str:
-    for package_name in ("arxiv-translate", "ieeA"):
+    for package_name in ("arxiv-zh", "arxiv-translate"):
         try:
             return metadata.version(package_name)
         except metadata.PackageNotFoundError:
@@ -1302,7 +1299,6 @@ def config_set(key: str, value: str):
     Set a configuration value (dot-separated).
     Example: arx config set llm.model gpt-4
     """
-    migrate_legacy_files()
     config_file = ensure_config_dir() / "config.yaml"
 
     # Load raw yaml to preserve structure if possible, or just dict
@@ -1353,7 +1349,6 @@ def glossary_add(
     notes: Optional[str] = typer.Option(None, help="Additional notes"),
 ):
     """Add a term to the glossary."""
-    migrate_legacy_files()
     glossary_file = ensure_config_dir() / "glossary.yaml"
 
     if glossary_file.exists():

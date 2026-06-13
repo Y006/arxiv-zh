@@ -49,7 +49,8 @@ def get_env_value(
     if env_value:
         return env_value
 
-    for dotenv_file in dotenv_files or dotenv_paths():
+    files = dotenv_paths() if dotenv_files is None else dotenv_files
+    for dotenv_file in files:
         dotenv_value = parse_dotenv_file(Path(dotenv_file)).get(key)
         if dotenv_value:
             return dotenv_value

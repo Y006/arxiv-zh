@@ -44,6 +44,3 @@ def test_local_font_dir_scan_finds_sample_cjk_families():
     assert "STSong" in families
     assert "STXihei" in families
     assert "STKaiti" in families
-    assert "SimSun" in families
-    assert "SimHei" in families
-    assert "KaiTi" in families

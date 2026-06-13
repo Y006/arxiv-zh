@@ -8,7 +8,8 @@ dynamic = ["version"]
 description = "DeepSeek-powered arXiv Chinese translation CLI with local font support"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "GPL-3.0-or-later"}
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 authors = [
   {name = "arxiv-zh Maintainers"},
 ]
@@ -55,9 +56,11 @@ arxiv-zh = "arxiv_translate.cli:zh_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["arxiv_translate*"]
+namespaces = false
 
-[tool.setuptools]
-license-files = []
+[tool.setuptools.package-data]
+arxiv_translate = ["defaults/*.yaml"]
 
 [tool.ruff]
 line-length = 88
@@ -74,6 +77,3 @@ local_scheme = "no-local-version"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-
-[dependency-groups]
-dev = []

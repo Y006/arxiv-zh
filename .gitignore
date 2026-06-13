@@ -11,6 +11,7 @@ coverage.xml
 .tox/
 .nox/
 debug/
+reports/
 
 # Type Checking
 .mypy_cache/
@@ -41,6 +42,7 @@ build/
 output/
 papers_cache/
 .cache/
+*.zip
 
 # LaTeX build artifacts
 *.aux
@@ -59,14 +61,7 @@ papers_cache/
 .idea/
 .vscode/
 *.swp
-tests/__pycache__/
-src/ieeA/__pycache__/
+.claude/
 .sisyphus/
 
 .git_corrupted
-
-发布准备/*
-legacy/ieea-transition/dist/
-legacy/ieea-transition/build/
-legacy/ieea-transition/.venv/
-legacy/ieea-transition/src/ieeA.egg-info/

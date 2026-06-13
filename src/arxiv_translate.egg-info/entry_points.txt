@@ -1,3 +1,0 @@
-[console_scripts]
-arx = arxiv_translate.cli:main
-arxiv-translate = arxiv_translate.cli:main

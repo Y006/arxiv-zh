@@ -58,4 +58,4 @@
 - 如果自动修复后的译文成功编译，`translated/` 下可能额外出现 `main_zh.before_compile.tex` 备份文件。
 
 ## Parser Debug模式
-当用户要求进入Parser 的Debug模式时，你需要测试 src/ieeA/parser/latex_parser.py。逐步执行代码中的函数，将中间文件存放在debug文件夹下。用户核对无误后，再将中间产物送给下一个函数，如此执行。这样做的目的是清晰地找到具体是parser中的哪一步出现了问题，从而制定解决方案。
+当用户要求进入Parser 的Debug模式时，你需要测试 src/arxiv_translate/parser/latex_parser.py。逐步执行代码中的函数，将中间文件存放在debug文件夹下。用户核对无误后，再将中间产物送给下一个函数，如此执行。这样做的目的是清晰地找到具体是parser中的哪一步出现了问题，从而制定解决方案。

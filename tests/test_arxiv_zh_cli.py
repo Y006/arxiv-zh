@@ -52,12 +52,13 @@ def test_prepare_arxiv_zh_output_dirs_resolves_relative_output(tmp_path: Path, m
 
 
 def test_arxiv_zh_options_require_deepseek_key(monkeypatch, tmp_path: Path):
-    from arxiv_translate.cli import _resolve_arxiv_zh_options
+    import arxiv_translate.cli as cli_module
 
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(cli_module, "_arxiv_zh_dotenv_paths", lambda: [])
 
     with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
-        _resolve_arxiv_zh_options(
+        cli_module._resolve_arxiv_zh_options(
             provider="deepseek",
             output=tmp_path / "paper",
             config=None,

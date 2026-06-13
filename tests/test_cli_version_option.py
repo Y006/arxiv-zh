@@ -40,3 +40,18 @@ def test_version_resolution_fallback_when_metadata_missing(monkeypatch):
     monkeypatch.setattr("arxiv_translate.cli.metadata.version", _raise_not_found)
 
     assert _resolve_cli_version() == "unknown"
+
+
+def test_version_resolution_prefers_current_distribution(monkeypatch):
+    seen = []
+
+    def _version(name: str):
+        seen.append(name)
+        if name == "arxiv-zh":
+            return "1.2.3"
+        raise PackageNotFoundError
+
+    monkeypatch.setattr("arxiv_translate.cli.metadata.version", _version)
+
+    assert _resolve_cli_version() == "1.2.3"
+    assert seen == ["arxiv-zh"]

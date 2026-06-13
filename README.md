@@ -1,32 +1,32 @@
-# arxiv-zh - DeepSeek arXiv 中文翻译工具
+# arxiv-zh
 
-`arxiv-zh` 是面向本地自用的 arXiv LaTeX 论文中文翻译工具。它以 DeepSeek 为默认翻译入口，保留上游 `arxiv-translate` 的下载、解析、缓存、断点续跑、重组和编译能力，并新增稳定输出目录、本地字体目录和 CLI 字体控制。
+`arxiv-zh` 是一个面向本地使用的 arXiv LaTeX 论文中文翻译 CLI。它下载 arXiv 源码、解析可翻译文本块、调用 DeepSeek 翻译、重组 LaTeX，并可用 XeLaTeX 编译中文 PDF。
 
-## Quick Start
+## 快速开始
 
 ```bash
 git clone https://github.com/Y006/arxiv-zh.git
 cd arxiv-zh
 
 uv sync
-
 cp .env.example .env
 # 编辑 .env，填入 DEEPSEEK_API_KEY
-python scripts/check_env.py
 
-uv run arxiv-zh 2605.28486 \
+uv run arxiv-zh 2501.12345 \
   --provider deepseek \
   --model deepseek-chat \
   --compile \
   --max-chunks 2 \
-  --output ./output/mag-vla-font-test \
+  --output ./output/test-paper \
   --font-dir ./fonts \
   --cjk-main-font STSong \
   --cjk-sans-font STXihei \
   --cjk-mono-font STKaiti
 ```
 
-输出目录：
+主入口是 `arxiv-zh`。`arx` 和 `arxiv-translate` 仍作为上游兼容入口保留。
+
+## 输出结构
 
 ```text
 output/<paper>/
@@ -40,270 +40,57 @@ output/<paper>/
 └── translation_report.md
 ```
 
-## 核心入口
-
-- 主命令：`arxiv-zh`
-- 默认模型：`deepseek-chat`
-- 可选模型：`--model deepseek-reasoner`
-- 默认本地字体目录：`./fonts`
-- DeepSeek 密钥：支持 shell 环境变量或项目根目录 `.env`，shell 环境变量优先
-- 旧命令 `arx` / `arxiv-translate` 仍保留，用于兼容上游工作流。
-
-更多本地使用说明见 [LOCAL_USAGE.md](LOCAL_USAGE.md)。
-
-## 从 ieeA 迁移
-
-- 安装方式迁移：从本仓库源码安装 `arxiv-zh`
-- 命令行迁移：`ieeA ...` -> `arxiv-zh ...`；`arx` / `arxiv-translate` 仅作为兼容入口保留
-- 配置目录迁移：
-  - 新目录：`~/.config/arxiv-translate/`
-  - 旧目录：`~/.ieeA/`
-  - 程序会在启动时自动将 `config.yaml`、`glossary.yaml`、`examples.yaml` 迁移到新目录（若新目录对应文件不存在）
-
-### 高级选项
-
-#### 批量翻译优化
-- 短内容（< 100 字符）会自动批量翻译，减少 API 调用
-- 纯占位符内容（如作者信息）会自动跳过翻译
-
-## 翻译流程 (Pipeline)
-
-```
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│  1. 下载    │ -> │  2. 解析    │ -> │  3. 翻译    │ -> │  4. 重组    │ -> │  5. 编译    │
-│  arXiv源码  │    │  LaTeX结构  │    │  文本块     │    │  LaTeX文档  │    │  生成PDF   │
-└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
-```
-
-### 1. 下载 (Downloader)
-从 arXiv 下载论文源码压缩包，自动解压并定位主 `.tex` 文件。
-
-### 2. 解析 (Parser)
-将 LaTeX 文档解析为可翻译的文本块 (Chunk)，同时保护不应翻译的元素。
-
-#### Chunk 划分依据（实际规则）
-
-| 类型 | 处理方式 | 方法 | 示例 |
-|------|----------|------|------|
-| **作者块** | 保护为占位符，不翻译 | 正则 + 大括号计数 | `\author{...}` → `[[AUTHOR_n]]` |
-| **caption** | 提取为 Chunk | 正则 + 大括号计数 | `\caption{...}` → `{{CHUNK_uuid}}` |
-| **保护环境** | 保护为占位符 | 正则 + 环境嵌套计数 | `equation`, `align`, `tikzpicture` → `[[MATHENV_n]]` |
-| **行内数学** | 保护为占位符 | 手写扫描 | `$...$`, `\(...\)`, `\[...\]` → `[[MATH_n]]` |
-| **保护命令** | 保护为占位符 | 正则 + 大括号计数 | `\cite{}`, `\ref{}`, `\label{}`, `\url{}`, `\footnote{}` |
-| **结构命令** | 提取参数为 Chunk | 正则 + 大括号计数 | `\title{}`, `\section{}` |
-| **可翻译环境** | 环境内容提取为 Chunk | 正则 + 环境嵌套计数 | `abstract`, `itemize`, `enumerate` |
-| **段落文本** | 按空行分段，长度>20字符提取为 Chunk | 行级扫描 + 阈值 | 正文段落 |
-
-#### 处理顺序（源码顺序）
-```
-原文 -> 保护作者块 -> 提取caption -> 保护数学环境 -> 保护行内公式
-     -> 保护命令(\cite等) -> 提取结构命令 -> 提取可翻译环境 -> 分割段落 -> Chunks
-```
-
-### 3. 翻译 (Translator)
-- 并发调用 LLM API 翻译各 Chunk
-- 支持术语表 (Glossary) 保持术语一致性，使用词边界匹配避免误匹配
-- 文档级术语表过滤：翻译前一次性扫描全文，构建稳定的 system prompt 以命中 LLM 提供商的前缀缓存
-- 自动重试和断点续传
-
-### 4. 重组 (Reconstructor)
-将翻译后的文本替换回占位符位置，还原完整 LaTeX 文档。
-
-### 5. 编译 (Compiler)
-使用 XeLaTeX 编译生成中文 PDF，自动注入中文字体支持。
-
 ## 配置
 
-配置文件位置：`~/.config/arxiv-translate/config.yaml`
-
-完整配置模板（按需删减，留空表示使用默认值）：
-
-```yaml
-llm:
-  # SDK: openai | openai-coding | anthropic | bailian | null（null 表示直连 HTTP）
-  sdk: null
-  # 模型名或列表（列表时取第一个）
-  models: openai/gpt-5-mini
-  # API Key（当 sdk 非空时必填）
-  key: ""
-  # 可选：自定义接口地址
-  endpoint: https://openrouter.ai/api/v1/chat/completions
-  temperature: 0.1
-  max_tokens: 4000
-
-compilation:
-  engine: xelatex
-  timeout: 120
-  clean_aux: true
-
-paths:
-  output_dir: output
-  cache_dir: .cache
-
-fonts:
-  # 自动检测中文字体
-  auto_detect: true
-  # 手动指定字体（可选）
-  main: null
-  sans: null
-  mono: null
-
-translation:
-  # 自定义提示词（可选）
-  custom_system_prompt: null
-  custom_user_prompt: null
-  # 额外保留原文的术语列表（不翻译）
-  preserve_terms: []
-  # 翻译质量：standard 或 high
-  quality_mode: standard
-  # Few-shot 示例文件路径（可选）
-  examples_path: null
-
-parser:
-  # 额外保护的 LaTeX 环境（不翻译）
-  extra_protected_environments: []
-  # 额外可翻译的 LaTeX 环境
-  extra_translatable_environments: []
-```
-
-### 迭代发送模式 (`openai-coding`)
-
-将 `llm.sdk` 设为 `openai-coding` 即可启用迭代发送模式。该模式下，翻译请求按顺序逐条发送，每次请求携带之前所有请求的完整对话历史，利用 LLM 提供商的 KV cache 前缀匹配来降低延迟和成本。
-
-```yaml
-# ~/.config/arxiv-translate/config.yaml
-llm:
-  sdk: openai-coding
-  models: gpt-4o
-  key: "sk-xxx"
-  endpoint: https://api.openai.com/v1/chat/completions   # 接口仍为标准 v1/chat/completions
-```
-
-也可通过命令行参数指定：
+DeepSeek 密钥支持 shell 环境变量或项目根目录 `.env`，shell 环境变量优先。
 
 ```bash
-arx translate https://arxiv.org/abs/2301.07041 --sdk openai-coding
+export DEEPSEEK_API_KEY=sk-...
 ```
 
-**与默认模式的区别：**
+完整配置模板见 `config.example.yaml`。默认用户配置目录是 `~/.config/arxiv-translate/`。
 
-| | 默认模式 (`openai`) | 迭代模式 (`openai-coding`) |
-|---|---|---|
-| 并发 | 多请求并发 | 严格顺序，逐条发送 |
-| 上下文 | 每个 chunk 独立翻译 | 携带全部历史对话，术语用词自动保持一致 |
-| 术语表 | 按 chunk 内容过滤后发送 | 发送完整术语表（保证 system prompt 不变以命中缓存） |
-| 系统提示词 | 标准提示词 | 额外追加"保持专业名词一致性"指令 |
-| Few-shot | 注入 | 始终注入，且位置固定 |
-| 断点续传 | 支持 | 支持（对话历史随 state file 一同保存） |
+项目保留三枚默认 CJK 字体：
 
-**适用场景：** 使用支持 KV cache 前缀匹配的提供商（如 OpenAI、DeepSeek）时，推荐使用此模式以获得更好的术语一致性和更低的推理成本。
-
-### 缓存命中优化
-
-默认模式（`openai`、`anthropic`、`bailian`、直连 HTTP）下，系统会自动优化缓存命中：
-
-1. **文档级术语表过滤**：翻译开始前扫描全文，一次性筛选出文档实际用到的术语，避免每个 chunk 产生不同的 system prompt
-2. **稳定 System Prompt**：为 individual 请求和 batch 请求分别预构建固定的 system prompt，整个文档翻译过程中保持不变
-3. **Provider 适配**：
-   - OpenAI / 通用 HTTP：保持 prompt 稳定即可自动命中前缀缓存（零配置）
-   - Anthropic：使用 system blocks 格式并标记 `cache_control: {"type": "ephemeral"}`，显式触发缓存
-   - 百炼平台 (Bailian)：使用 system blocks 格式并标记 `cache_control`，显式触发缓存
-   - 火山引擎 (Ark endpoint)：自动识别 `ark.*.volces.com`，使用 Context API 缓存 system prompt，5 分钟 TTL，过期自动重建
-
-无需额外安装 Ark 客户端，使用 OpenAI 风格配置并填写 Ark endpoint 即可生效。
-
-### 火山引擎 (Ark 自动识别)
-
-保持 OpenAI 风格配置；当 `endpoint` 命中 `ark.*.volces.com` 时，系统会自动切换到 Ark Context API 缓存逻辑：
-
-```yaml
-llm:
-  # sdk 可用 openai / openai-coding / null
-  sdk: openai
-  models: ep-xxxxxxxx  # 火山引擎模型接入点 ID
-  key: "your-api-key"
-  endpoint: https://ark.cn-beijing.volces.com/api/v3
+```text
+fonts/STSONG.TTF
+fonts/STXIHEI.TTF
+fonts/STKAITI.TTF
 ```
 
-也支持将 endpoint 写成 `.../api/v3/chat/completions`，系统会自动归一化。
-`sdk=ark` 已移除，如需使用 Ark 请改为上述配置方式。
+如果不传 `--font-dir`，CLI 会优先扫描项目 `fonts/`，再回退到系统字体。
 
-### 百炼平台 (Bailian)
+## 核心流程
 
-将 `llm.sdk` 设为 `bailian` 使用阿里百炼平台的大模型服务，自动启用显式缓存：
+1. 下载 arXiv 源码并定位主 `.tex`。
+2. 保护公式、引用、标签、作者块等不应翻译的结构。
+3. 提取标题、章节、caption、可翻译环境和正文段落为 chunk。
+4. 调用 LLM 翻译，支持本地缓存和占位符校验。
+5. 将译文重组回 LaTeX。
+6. 可选编译 `translated/main_zh.tex` 为 PDF。
 
-```yaml
-llm:
-  sdk: bailian
-  models: qwen3.5-plus  # 或其他支持显式缓存的模型
-  key: "your-dashscope-api-key"
-  # endpoint 可选，默认为 https://dashscope.aliyuncs.com/compatible-mode/v1
-```
+## 仓库结构
 
-**显式缓存优势**：
-- **确定性命中**：首次请求创建缓存后，5 分钟内后续请求确定性命中
-- **成本节省**：命中缓存的 Token 按 10% 计费，创建缓存按 125% 计费
-- **延迟降低**：命中缓存时响应速度显著提升
-
-**支持的模型**：qwen3.5-plus、qwen-plus、qwen3-max、qwen-flash、qwen3-coder-plus 等
-
-**工作原理**：
-BailianProvider 自动将 system message 转换为数组格式并添加 `cache_control: {"type": "ephemeral"}` 标记，触发百炼平台的显式缓存机制。缓存有效期 5 分钟，命中后自动续期。
-
-### 术语表
-
-术语表位置：`~/.config/arxiv-translate/glossary.yaml`
-
-```yaml
-# 保持原文不翻译
-"MMLU": "MMLU"
-"LLaMA": "LLaMA"
-
-# 指定翻译
-"Attention": "注意力机制"
-"Transformer":
-  target: "Transformer"
-  context: "Deep Learning"
-```
-
-## 支持的 LLM
-
-| 提供商 | SDK | 模型示例 | 缓存机制 |
-|--------|-----|----------|----------|
-| OpenAI | `openai` | gpt-4o, gpt-4o-mini | 自动前缀缓存 |
-| Claude | `anthropic` | claude-3-opus, claude-3-sonnet | 显式 cache_control |
-| 火山引擎 | `openai/openai-coding/null + Ark endpoint` | doubao-pro-* | Context API |
-| 百炼平台 | `bailian` | qwen3.5-plus, qwen-plus | 显式 cache_control |
-| 通用 HTTP | `null` | 任意 OpenAI 兼容接口 | 服务端隐式缓存 |
-
-**提示**：可通过 `endpoint` 配置使用 OpenRouter 等代理服务。
-
-## 项目结构
-
-```
+```text
 src/arxiv_translate/
-├── cli.py              # 命令行入口
-├── downloader/         # arXiv 下载器
-├── parser/             # LaTeX 解析与分块
-│   ├── latex_parser.py # 核心解析逻辑
-│   └── structure.py    # Chunk 数据结构
-├── translator/         # 翻译流水线
-├── compiler/           # PDF 编译
-├── validator/          # 翻译质量验证
-└── rules/              # 配置与术语表
+├── cli.py
+├── downloader/
+├── parser/
+├── translator/
+├── compiler/
+├── validator/
+├── cache/
+├── rules/
+└── defaults/
 ```
 
-## 依赖
+## 验证
 
-- Python 3.10+
-- XeLaTeX（用于 PDF 编译）
-- 中文字体（macOS 自动检测 Songti SC / PingFang SC）
-
-## 发布
-
-- 主包 `arxiv-translate` 发布流程：`docs/release.md`
-- 旧包 `ieeA` 过渡发布配置：`legacy/ieea-transition/`
+```bash
+uv run --extra dev pytest
+uv run arxiv-zh --help
+```
 
 ## License
 
-GPL-3.0
+GPL-3.0-or-later

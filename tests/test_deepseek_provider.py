@@ -30,12 +30,13 @@ def test_deepseek_provider_uses_dotenv_key(monkeypatch, tmp_path):
 
 
 def test_deepseek_provider_requires_env_key(monkeypatch):
-    from arxiv_translate.translator.deepseek_provider import DeepSeekProvider
+    import arxiv_translate.translator.deepseek_provider as provider_mod
 
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(provider_mod, "_deepseek_dotenv_paths", lambda: [])
 
     with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
-        DeepSeekProvider()
+        provider_mod.DeepSeekProvider()
 
 
 def test_deepseek_provider_masks_key_in_repr(monkeypatch):

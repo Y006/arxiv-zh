@@ -8,15 +8,13 @@
 git clone https://github.com/Y006/arxiv-zh.git
 cd arxiv-zh
 
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+uv sync
 
 cp .env.example .env
 # 编辑 .env，填入 DEEPSEEK_API_KEY
 python scripts/check_env.py
 
-arxiv-zh 2605.28486 \
+uv run arxiv-zh 2605.28486 \
   --provider deepseek \
   --model deepseek-chat \
   --compile \
@@ -38,6 +36,7 @@ output/<paper>/
 ├── cache/
 ├── logs/translate.log
 ├── logs/compile.log
+├── logs/compile_attempts.json
 └── translation_report.md
 ```
 

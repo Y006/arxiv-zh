@@ -39,5 +39,23 @@
 ### 写入文件规范
 长文本需要分段写入，避免触发max_tokens上限。
 
+## arxiv-zh 本地使用速记
+
+- 当前本地主入口是 `arxiv-zh`；在开发环境里优先使用 `uv run arxiv-zh ...`。
+- 第一版只支持 DeepSeek；默认模型是 `deepseek-chat`，需要切换时显式传 `--model`。
+- 快速验证命令：
+  ```bash
+  uv run arxiv-zh 2501.12345 --provider deepseek --compile --max-chunks 2 --output ./output/test-paper
+  ```
+- 编译策略：
+  - 优先 `latexmk + xelatex`
+  - 失败后会进行安全修复并回退到 `lualatex`
+  - `pdflatex` 默认不用来编译含中文文档，除非配置显式开启
+- 编译诊断优先看：
+  - `logs/compile_attempts.json`
+  - `logs/compile_error_summary.md`
+  - `logs/compile.log`
+- 如果自动修复后的译文成功编译，`translated/` 下可能额外出现 `main_zh.before_compile.tex` 备份文件。
+
 ## Parser Debug模式
 当用户要求进入Parser 的Debug模式时，你需要测试 src/ieeA/parser/latex_parser.py。逐步执行代码中的函数，将中间文件存放在debug文件夹下。用户核对无误后，再将中间产物送给下一个函数，如此执行。这样做的目的是清晰地找到具体是parser中的哪一步出现了问题，从而制定解决方案。

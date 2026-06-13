@@ -60,7 +60,8 @@ python scripts/check_env.py
 - `DEEPSEEK_API_KEY` 存在。
 - `DEEPSEEK_API_KEY source` 显示 `environment` 或 `.env`。
 - `xelatex` 可用。
-- 优先有 `latexmk`；没有时会回退到多轮 `xelatex`。
+- 优先有 `latexmk`；如果没有，会回退到已安装的 LaTeX 引擎流程。
+- 编译时默认优先 `latexmk + xelatex`；失败后会做安全修复，并继续尝试 `lualatex`。
 - TinyTeX 常见路径存在：
   - `~/Library/TinyTeX/bin/universal-darwin/`
   - `/Library/TeX/texbin/`
@@ -68,7 +69,7 @@ python scripts/check_env.py
 ## 快速测试
 
 ```bash
-arxiv-zh 2501.12345 --provider deepseek --compile --max-chunks 2 --output ./output/test-paper
+uv run arxiv-zh 2501.12345 --provider deepseek --compile --max-chunks 2 --output ./output/test-paper
 ```
 
 `--max-chunks 2` 只翻译前两个 chunk，适合验证 API、缓存、重组和编译链路。
@@ -76,7 +77,7 @@ arxiv-zh 2501.12345 --provider deepseek --compile --max-chunks 2 --output ./outp
 默认模型是 `deepseek-chat`。需要切换模型时使用 `--model`：
 
 ```bash
-arxiv-zh 2501.12345 --provider deepseek --model deepseek-reasoner --max-chunks 2 --output ./output/reasoner-test
+uv run arxiv-zh 2501.12345 --provider deepseek --model deepseek-reasoner --max-chunks 2 --output ./output/reasoner-test
 ```
 
 ## 本地字体
@@ -92,7 +93,7 @@ arxiv-zh 2501.12345 --provider deepseek --model deepseek-reasoner --max-chunks 2
 可以完全通过 CLI 控制字体：
 
 ```bash
-arxiv-zh 2605.28486 \
+uv run arxiv-zh 2605.28486 \
   --provider deepseek \
   --compile \
   --max-chunks 2 \
@@ -116,14 +117,28 @@ arxiv-zh 2605.28486 \
 ## 完整翻译
 
 ```bash
-arxiv-zh 2501.12345 --provider deepseek --compile --output ./output/2501.12345
+uv run arxiv-zh 2501.12345 --provider deepseek --compile --output ./output/2501.12345
 ```
 
 不需要 PDF 时去掉 `--compile`：
 
 ```bash
-arxiv-zh 2501.12345 --provider deepseek --output ./output/2501.12345
+uv run arxiv-zh 2501.12345 --provider deepseek --output ./output/2501.12345
 ```
+
+如果已经把项目安装到当前环境，以上命令也可以直接写成 `arxiv-zh ...`。
+
+## 编译回退与诊断
+
+- 默认编译顺序：
+  1. `latexmk -xelatex`
+  2. 基于日志的低风险自动修复后重试
+  3. `latexmk -lualatex`
+  4. 仅在配置显式允许时才考虑 `pdflatex + CJK`
+- 默认不会自动开启 `-shell-escape`。
+- 成功编译后，如果自动修复过 `translated/main_zh.tex`，会保留 `translated/main_zh.before_compile.tex` 作为备份。
+- 每次编译都会生成结构化诊断文件：`logs/compile_attempts.json`。
+- `logs/compile_error_summary.md` 主要在编译失败时生成。
 
 ## 输出目录
 
@@ -139,7 +154,8 @@ output/<paper>/
 ├── cache/
 ├── logs/
 │   ├── translate.log
-│   └── compile.log
+│   ├── compile.log
+│   └── compile_attempts.json
 └── translation_report.md
 ```
 
@@ -152,14 +168,15 @@ output/<paper>/
 ├── logs/
 │   ├── translate.log
 │   ├── compile.log
-│   └── compile_error_summary.md
+│   ├── compile_error_summary.md
+│   └── compile_attempts.json
 └── translation_report.md
 ```
 
 ## 排错
 
 - 翻译失败：看 `logs/translate.log`。
-- 编译失败：先看 `logs/compile_error_summary.md`，再看完整 `logs/compile.log`。
+- 编译失败：先看 `logs/compile_attempts.json`，再看 `logs/compile_error_summary.md` 和完整 `logs/compile.log`。
 - 断点续跑：再次运行同一个 `--output` 目录，翻译状态和本地缓存会继续使用 `cache/` 下的文件。
 
 ## 验收
@@ -167,5 +184,5 @@ output/<paper>/
 ```bash
 python scripts/check_env.py
 uv run --with pytest --with pytest-asyncio python -m pytest
-arxiv-zh 2501.12345 --provider deepseek --compile --max-chunks 2 --output ./output/test-paper
+uv run arxiv-zh 2501.12345 --provider deepseek --compile --max-chunks 2 --output ./output/test-paper
 ```

@@ -379,6 +379,14 @@ def test_compile_file_writes_attempt_diagnostics_when_all_engines_fail(
     assert "Shell Escape Required" in summary
 
 
+def test_restricted_write18_success_log_is_not_shell_escape_required():
+    compiler = LaTeXCompiler()
+
+    category = compiler._classify_compile_log("restricted \\write18 enabled.", None)
+
+    assert category == "unknown"
+
+
 def test_apply_missing_file_fallback_sets_bxcoloremoji_names_false(tmp_path: Path):
     compiler = LaTeXCompiler()
     source = r"""

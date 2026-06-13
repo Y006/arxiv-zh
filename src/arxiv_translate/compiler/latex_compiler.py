@@ -295,7 +295,9 @@ class LaTeXCompiler:
                     success=success,
                     returncode=returncode,
                     error=error,
-                    category=self._classify_compile_log(log_content, error),
+                    category="success"
+                    if success
+                    else self._classify_compile_log(log_content, error),
                     repairs=list(applied_repairs),
                 )
                 attempts.append(attempt)
@@ -807,7 +809,12 @@ class LaTeXCompiler:
     @staticmethod
     def _classify_compile_log(log_content: str, error: Optional[str] = None) -> str:
         lowered = f"{log_content or ''}\n{error or ''}".lower()
-        if "shell-escape" in lowered or "write18" in lowered:
+        if re.search(
+            r"(?:(?:must|requires?|needed?|disabled)\W+(?:.{0,80})"
+            r"(?:shell-escape|write18)|(?:shell-escape|write18)\W+(?:.{0,80})"
+            r"(?:required|requires?|needed?|disabled|must))",
+            lowered,
+        ):
             return "shell_escape"
         if "fontspec" in lowered:
             return "fontspec"

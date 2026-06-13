@@ -11,7 +11,7 @@ from .deepseek_provider import DeepSeekProvider
 from arxiv_translate.rules.env import get_env_value
 
 DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
 
 
 def _normalize_openai_base_url(endpoint: Optional[str]) -> Optional[str]:

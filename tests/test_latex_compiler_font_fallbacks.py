@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -102,7 +103,8 @@ def test_compile_prefers_informative_error_instead_of_unknown(monkeypatch, tmp_p
         )
 
     monkeypatch.setattr(
-        "arxiv_translate.compiler.latex_compiler.shutil.which", lambda _engine: "/usr/bin/true"
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        lambda _engine, path=None: "/usr/bin/true",
     )
     monkeypatch.setattr(compiler, "_run_engine", fake_run_engine)
 
@@ -158,7 +160,7 @@ def test_compile_file_sets_osfontdir_when_fonts_dir_exists(monkeypatch, tmp_path
     monkeypatch.setenv("OSFONTDIR", "/existing/fonts")
     monkeypatch.setattr(
         "arxiv_translate.compiler.latex_compiler.shutil.which",
-        lambda name: "/usr/bin/latexmk" if name == "latexmk" else None,
+        lambda name, path=None: "/usr/bin/latexmk" if name == "latexmk" else None,
     )
     monkeypatch.setattr("subprocess.run", fake_run)
 
@@ -171,6 +173,87 @@ def test_compile_file_sets_osfontdir_when_fonts_dir_exists(monkeypatch, tmp_path
     assert "OSFONTDIR" in captured["env"]
     assert str(fonts_dir) in captured["env"]["OSFONTDIR"]
     assert "/existing/fonts" in captured["env"]["OSFONTDIR"]
+
+
+def test_tinytex_paths_are_prepended_to_path(monkeypatch, tmp_path: Path):
+    tinytex_bin = tmp_path / "TinyTeX" / "bin" / "universal-darwin"
+    tinytex_bin.mkdir(parents=True)
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    compiler = LaTeXCompiler(tinytex_paths=[str(tinytex_bin)])
+    env = compiler._build_env()
+
+    assert env["PATH"].split(os.pathsep)[0] == str(tinytex_bin.resolve())
+
+
+def test_compile_file_installs_missing_tinytex_package(
+    monkeypatch,
+    tmp_path: Path,
+):
+    build_dir = tmp_path / "build"
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\n"
+        "\\usepackage{enumitem}\n"
+        "\\begin{document}x\\end{document}\n",
+        encoding="utf-8",
+    )
+    installed = {"enumitem": False}
+    commands = []
+
+    def fake_which(name, path=None):
+        if name == "latexmk":
+            return "/tinytex/bin/latexmk"
+        if name == "tlmgr":
+            return "/tinytex/bin/tlmgr"
+        return None
+
+    def fake_run(cmd, **kwargs):
+        commands.append(cmd)
+        if cmd[0] == "/tinytex/bin/tlmgr" and cmd[1] == "search":
+            return SimpleNamespace(
+                returncode=0,
+                stdout="enumitem:\n\ttexmf-dist/tex/latex/enumitem/enumitem.sty\n",
+                stderr="",
+            )
+        if cmd[0] == "/tinytex/bin/tlmgr" and cmd[1] == "install":
+            installed["enumitem"] = True
+            return SimpleNamespace(returncode=0, stdout="installed", stderr="")
+        if cmd[0] == "latexmk":
+            tex_arg = Path(cmd[-1])
+            if not installed["enumitem"]:
+                return SimpleNamespace(
+                    returncode=1,
+                    stdout="! LaTeX Error: File `enumitem.sty' not found.\n",
+                    stderr="",
+                )
+            build_dir.mkdir(parents=True, exist_ok=True)
+            (build_dir / f"{tex_arg.stem}.pdf").write_bytes(
+                b"%PDF-1.5\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+            )
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler().compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+        max_repair_rounds=0,
+    )
+
+    assert result.success is True
+    assert [cmd[:2] for cmd in commands if cmd[0] == "/tinytex/bin/tlmgr"] == [
+        ["/tinytex/bin/tlmgr", "search"],
+        ["/tinytex/bin/tlmgr", "install"],
+    ]
+    assert any("tlmgr_install:enumitem" in attempt.repairs for attempt in result.attempts)
 
 
 def test_prepare_compile_inputs_sanitizes_unicode_engine_conflicts(tmp_path: Path):
@@ -254,7 +337,7 @@ def test_compile_file_disables_bibtex_when_using_precompiled_bbl(
 
     monkeypatch.setattr(
         "arxiv_translate.compiler.latex_compiler.shutil.which",
-        lambda name: "/usr/bin/latexmk" if name == "latexmk" else None,
+        lambda name, path=None: "/usr/bin/latexmk" if name == "latexmk" else None,
     )
     monkeypatch.setattr("subprocess.run", fake_run)
 
@@ -298,7 +381,7 @@ def test_compile_file_falls_back_from_xelatex_to_lualatex(monkeypatch, tmp_path:
 
     monkeypatch.setattr(
         "arxiv_translate.compiler.latex_compiler.shutil.which",
-        lambda name: f"/usr/bin/{name}" if name == "latexmk" else None,
+        lambda name, path=None: f"/usr/bin/{name}" if name == "latexmk" else None,
     )
     monkeypatch.setattr("subprocess.run", fake_run)
 
@@ -354,7 +437,7 @@ def test_compile_file_writes_attempt_diagnostics_when_all_engines_fail(
 
     monkeypatch.setattr(
         "arxiv_translate.compiler.latex_compiler.shutil.which",
-        lambda name: f"/usr/bin/{name}" if name == "latexmk" else None,
+        lambda name, path=None: f"/usr/bin/{name}" if name == "latexmk" else None,
     )
     monkeypatch.setattr("subprocess.run", fake_run)
 
@@ -509,7 +592,8 @@ def test_compile_reports_latest_round_error_after_fallback(monkeypatch, tmp_path
         )
 
     monkeypatch.setattr(
-        "arxiv_translate.compiler.latex_compiler.shutil.which", lambda _engine: "/usr/bin/true"
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        lambda _engine, path=None: "/usr/bin/true",
     )
     monkeypatch.setattr(compiler, "_run_engine", fake_run_engine)
 
@@ -578,7 +662,7 @@ def test_compile_strips_pdftex_primitive_before_first_engine_run(monkeypatch, tm
 
     monkeypatch.setattr(
         "arxiv_translate.compiler.latex_compiler.shutil.which",
-        lambda _engine: "/usr/bin/true",
+        lambda _engine, path=None: "/usr/bin/true",
     )
     monkeypatch.setattr(compiler, "_run_engine", fake_run_engine)
 

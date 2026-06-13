@@ -22,7 +22,7 @@ class DeepSeekProvider(OpenAIProvider):
     """DeepSeek chat provider using the OpenAI-compatible API."""
 
     DEFAULT_BASE_URL = "https://api.deepseek.com"
-    DEFAULT_MODEL = "deepseek-chat"
+    DEFAULT_MODEL = "deepseek-v4-flash"
     DEFAULT_API_KEY_ENV = "DEEPSEEK_API_KEY"
 
     def __init__(

@@ -2,7 +2,6 @@
 
 import asyncio
 import time
-import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 
 
@@ -25,7 +24,7 @@ class TestOpenAIProviderCache:
             provider = OpenAIProvider(model="test", api_key="test")
             provider._prebuilt_system_prompt = "FIXED_PROMPT"
 
-            result = await provider.translate("test text", glossary_hints=None)
+            await provider.translate("test text", glossary_hints=None)
 
             call_args = mock_client.chat.completions.create.call_args
             messages = call_args.kwargs.get("messages", [])
@@ -46,7 +45,7 @@ class TestOpenAIProviderCache:
 
             provider = OpenAIProvider(model="test", api_key="test")
 
-            result = await provider.translate("test", glossary_hints={"AI": "AI"})
+            await provider.translate("test", glossary_hints={"AI": "AI"})
 
             call_args = mock_client.chat.completions.create.call_args
             messages = call_args.kwargs.get("messages", [])
@@ -68,13 +67,37 @@ class TestOpenAIProviderCache:
             provider = OpenAIProvider(model="test", api_key="test")
             provider._prebuilt_system_prompt = "FIXED_PROMPT"
 
-            result = await provider.translate("test", glossary_hints={"NLP": "NLP"})
+            await provider.translate("test", glossary_hints={"NLP": "NLP"})
 
             call_args = mock_client.chat.completions.create.call_args
             messages = call_args.kwargs.get("messages", [])
             # Should NOT be the prebuilt prompt — should be dynamically built
             assert messages[0]["content"] != "FIXED_PROMPT"
             assert "NLP" in messages[0]["content"]
+
+    async def test_translate_passes_configured_max_tokens(self):
+        """Configured max_tokens should be forwarded to OpenAI-compatible APIs."""
+        with patch("arxiv_translate.translator.openai_provider.openai") as mock_openai:
+            mock_client = MagicMock()
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "translated"
+            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+            mock_openai.AsyncOpenAI.return_value = mock_client
+            mock_openai.Timeout = MagicMock()
+
+            from arxiv_translate.translator.openai_provider import OpenAIProvider
+
+            provider = OpenAIProvider(
+                model="deepseek-v4-flash",
+                api_key="test",
+                max_tokens=65536,
+            )
+
+            await provider.translate("test")
+
+            call_args = mock_client.chat.completions.create.call_args
+            assert call_args.kwargs["max_tokens"] == 65536
 
 
 class TestAnthropicProviderCache:
@@ -102,7 +125,7 @@ class TestAnthropicProviderCache:
             provider._prebuilt_system_prompt = "FIXED_PROMPT"
             provider._prebuilt_batch_prompt = None
 
-            result = await provider.translate("test", glossary_hints=None)
+            await provider.translate("test", glossary_hints=None)
 
             call_args = mock_client.messages.create.call_args
             system_arg = call_args.kwargs.get("system")
@@ -132,7 +155,7 @@ class TestAnthropicProviderCache:
             provider._prebuilt_system_prompt = None
             provider._prebuilt_batch_prompt = None
 
-            result = await provider.translate("test", glossary_hints={"AI": "AI"})
+            await provider.translate("test", glossary_hints={"AI": "AI"})
 
             call_args = mock_client.messages.create.call_args
             system_arg = call_args.kwargs.get("system")
@@ -197,7 +220,7 @@ class TestHTTPProviderCache:
             )
             provider._prebuilt_system_prompt = "FIXED_PROMPT"
 
-            result = await provider.translate("test text", glossary_hints=None)
+            await provider.translate("test text", glossary_hints=None)
 
             call_args = mock_client.post.call_args
             request_body = call_args.kwargs.get("json", {})
@@ -224,7 +247,7 @@ class TestHTTPProviderCache:
                 endpoint="http://test/v1/chat/completions",
             )
 
-            result = await provider.translate("test", glossary_hints={"AI": "AI"})
+            await provider.translate("test", glossary_hints={"AI": "AI"})
 
             call_args = mock_client.post.call_args
             request_body = call_args.kwargs.get("json", {})

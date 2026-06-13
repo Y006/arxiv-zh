@@ -1,4 +1,5 @@
 import json
+import glob
 import os
 import shutil
 import subprocess
@@ -137,11 +138,34 @@ class CompilationResult:
 
 
 class LaTeXCompiler:
-    def __init__(self, timeout: int = 120, fonts_dir: Optional[Union[str, Path]] = None):
+    DEFAULT_TINYTEX_PATHS = [
+        "~/Library/TinyTeX/bin/universal-darwin",
+        "~/.TinyTeX/bin/*",
+        "~/TinyTeX/bin/*",
+        "/Library/TinyTeX/bin/universal-darwin",
+        "/Library/TeX/texbin",
+    ]
+
+    def __init__(
+        self,
+        timeout: int = 600,
+        fonts_dir: Optional[Union[str, Path]] = None,
+        *,
+        use_tinytex: bool = True,
+        tinytex_paths: Optional[List[str]] = None,
+        install_missing_packages: bool = True,
+        install_timeout: int = 1200,
+        max_package_install_rounds: int = 8,
+    ):
         self.timeout = timeout
         # Priority: xelatex (best CJK), lualatex (good CJK), pdflatex (fallback)
         self.engines = ["xelatex", "lualatex", "pdflatex"]
         self.fonts_dir = Path(fonts_dir).resolve() if fonts_dir else None
+        self.use_tinytex = use_tinytex
+        self.tinytex_paths = list(tinytex_paths or self.DEFAULT_TINYTEX_PATHS)
+        self.install_missing_packages = install_missing_packages
+        self.install_timeout = install_timeout
+        self.max_package_install_rounds = max_package_install_rounds
 
     def inject_chinese_support(self, latex_source: str) -> str:
         """Wrapper around the injection logic."""
@@ -149,6 +173,12 @@ class LaTeXCompiler:
 
     def _build_env(self) -> Dict[str, str]:
         env = os.environ.copy()
+        tinytex_paths = self._resolve_tinytex_paths()
+        if tinytex_paths:
+            existing_path = env.get("PATH", "")
+            env["PATH"] = os.pathsep.join(
+                [str(path) for path in tinytex_paths] + ([existing_path] if existing_path else [])
+            )
         if self.fonts_dir and self.fonts_dir.exists():
             existing_font_dirs = env.get("OSFONTDIR", "").strip()
             if existing_font_dirs:
@@ -158,6 +188,30 @@ class LaTeXCompiler:
             else:
                 env["OSFONTDIR"] = str(self.fonts_dir)
         return env
+
+    def _resolve_tinytex_paths(self) -> List[Path]:
+        if not self.use_tinytex:
+            return []
+
+        resolved: List[Path] = []
+        seen: set[str] = set()
+        for configured in self.tinytex_paths:
+            expanded = os.path.expandvars(os.path.expanduser(str(configured)))
+            matches = glob.glob(expanded) if any(ch in expanded for ch in "*?[]") else [expanded]
+            for match in matches:
+                path = Path(match)
+                if not path.is_dir():
+                    continue
+                key = str(path.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                resolved.append(path.resolve())
+        return resolved
+
+    def _which(self, command: str, env: Optional[Dict[str, str]] = None) -> Optional[str]:
+        path = (env or self._build_env()).get("PATH")
+        return shutil.which(command, path=path)
 
     def compile_file(
         self,
@@ -187,6 +241,7 @@ class LaTeXCompiler:
         build_path.mkdir(parents=True, exist_ok=True)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("", encoding="utf-8")
+        env = self._build_env()
 
         if not tex_file.exists():
             message = f"TeX file not found: {tex_file}"
@@ -224,14 +279,14 @@ class LaTeXCompiler:
             latex_source=prepared_source,
             allow_pdflatex_cjk=allow_pdflatex_cjk,
         )
-        if prefer_latexmk and shutil.which("latexmk"):
+        if prefer_latexmk and self._which("latexmk", env):
             command_mode = "latexmk"
         else:
             command_mode = "direct"
 
         if command_mode == "direct":
             available_engines = [
-                engine for engine in available_engines if shutil.which(engine)
+                engine for engine in available_engines if self._which(engine, env)
             ]
         if not available_engines:
             message = "No usable LaTeX engine was found on PATH."
@@ -262,8 +317,12 @@ class LaTeXCompiler:
                 font_dir=self.fonts_dir,
             )
             applied_repairs: List[str] = []
+            package_install_count = 0
+            source_repair_count = 0
 
-            for round_index in range(max_repair_rounds + 1):
+            for round_index in range(
+                max_repair_rounds + self.max_package_install_rounds + 1
+            ):
                 candidate = build_path / (
                     f"{tex_file.stem}.{engine}.round{round_index + 1}.tex"
                 )
@@ -285,6 +344,7 @@ class LaTeXCompiler:
                     cmd,
                     cwd=tex_file.parent,
                     log_path=log_path,
+                    env=env,
                 )
                 last_log = log_content
                 last_error = error
@@ -333,6 +393,23 @@ class LaTeXCompiler:
                 if success:
                     last_error = "Generated PDF failed integrity check (%PDF/%%EOF)."
 
+                installed_package = None
+                if self.install_missing_packages:
+                    installed_package = self._install_missing_package_from_log(
+                        log_content,
+                        log_path=log_path,
+                        env=env,
+                    )
+                if installed_package:
+                    install_reason = f"tlmgr_install:{installed_package}"
+                    if (
+                        install_reason not in applied_repairs
+                        and package_install_count < self.max_package_install_rounds
+                    ):
+                        applied_repairs.append(install_reason)
+                        package_install_count += 1
+                        continue
+
                 patched_source, fallback_reason, changed = (
                     self._apply_compile_file_log_fallbacks(
                         engine_source,
@@ -343,11 +420,12 @@ class LaTeXCompiler:
                 if (
                     not changed
                     or fallback_reason in applied_repairs
-                    or round_index >= max_repair_rounds
+                    or source_repair_count >= max_repair_rounds
                 ):
                     break
                 engine_source = patched_source
                 applied_repairs.append(fallback_reason)
+                source_repair_count += 1
 
         self._write_compile_attempts(diagnostic_path, attempts)
         log_content = log_path.read_text(encoding="utf-8", errors="replace")
@@ -389,6 +467,7 @@ class LaTeXCompiler:
                     self._copy_resources(working_dir_path, temp_path)
 
             source_file = temp_path / "main.tex"
+            env = self._build_env()
             last_error = None
             last_log = None
             applied_fallback_reasons = set()
@@ -411,7 +490,7 @@ class LaTeXCompiler:
 
                 for engine in self.engines:
                     # Skip engines that are not installed
-                    if not shutil.which(engine):
+                    if not self._which(engine, env):
                         continue
 
                     success, log, error = self._run_engine(
@@ -685,6 +764,7 @@ class LaTeXCompiler:
         *,
         cwd: Path,
         log_path: Path,
+        env: Optional[Dict[str, str]] = None,
     ) -> Tuple[bool, str, Optional[str], Optional[int]]:
         header = f"$ {' '.join(cmd)}\n"
         with log_path.open("a", encoding="utf-8") as log_file:
@@ -698,7 +778,7 @@ class LaTeXCompiler:
                 timeout=self.timeout,
                 encoding="utf-8",
                 errors="replace",
-                env=self._build_env(),
+                env=env or self._build_env(),
             )
             combined_log = process.stdout + "\n" + process.stderr
             with log_path.open("a", encoding="utf-8") as log_file:
@@ -734,6 +814,122 @@ class LaTeXCompiler:
                 message,
                 None,
             )
+
+    def _install_missing_package_from_log(
+        self,
+        log_content: str,
+        *,
+        log_path: Path,
+        env: Dict[str, str],
+    ) -> Optional[str]:
+        missing_file = self._extract_missing_latex_file(log_content)
+        if not missing_file:
+            return None
+
+        tlmgr = self._which("tlmgr", env)
+        if not tlmgr:
+            self._append_compile_log(
+                log_path,
+                f"TinyTeX package install skipped: tlmgr not found for {missing_file}.",
+            )
+            return None
+
+        package = self._find_tlmgr_package_for_file(missing_file, tlmgr=tlmgr, env=env)
+        if not package:
+            self._append_compile_log(
+                log_path,
+                f"TinyTeX package install skipped: no package found for {missing_file}.",
+            )
+            return None
+
+        if self._install_tlmgr_package(package, tlmgr=tlmgr, env=env, log_path=log_path):
+            return package
+        return None
+
+    def _find_tlmgr_package_for_file(
+        self,
+        missing_file: str,
+        *,
+        tlmgr: str,
+        env: Dict[str, str],
+    ) -> Optional[str]:
+        query = missing_file.strip()
+        if not query:
+            return None
+        if not query.startswith("/"):
+            query = f"/{query}"
+
+        try:
+            process = subprocess.run(
+                [tlmgr, "search", "--global", "--file", query],
+                capture_output=True,
+                text=True,
+                timeout=self.install_timeout,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+            )
+        except Exception:
+            return None
+
+        if process.returncode != 0:
+            return None
+
+        for line in process.stdout.splitlines():
+            stripped = line.strip()
+            if not stripped or ":" not in stripped:
+                continue
+            package, _sep, _rest = stripped.partition(":")
+            package = package.strip()
+            if package:
+                return package
+        return None
+
+    def _install_tlmgr_package(
+        self,
+        package: str,
+        *,
+        tlmgr: str,
+        env: Dict[str, str],
+        log_path: Path,
+    ) -> bool:
+        self._append_compile_log(
+            log_path,
+            f"TinyTeX installing missing package with tlmgr: {package}",
+        )
+        try:
+            process = subprocess.run(
+                [tlmgr, "install", package],
+                capture_output=True,
+                text=True,
+                timeout=self.install_timeout,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            self._append_compile_log(
+                log_path,
+                f"TinyTeX package install timed out after {self.install_timeout}s: {package}",
+            )
+            return False
+        except Exception as exc:
+            self._append_compile_log(
+                log_path,
+                f"TinyTeX package install failed for {package}: {exc}",
+            )
+            return False
+
+        install_log = (process.stdout or "") + "\n" + (process.stderr or "")
+        self._append_compile_log(log_path, install_log.strip())
+        return process.returncode == 0
+
+    @staticmethod
+    def _append_compile_log(log_path: Path, message: str) -> None:
+        if not message:
+            return
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(message.rstrip() + "\n")
 
     @staticmethod
     def _find_built_pdf(
@@ -929,9 +1125,10 @@ class LaTeXCompiler:
         self, engine: str, source_file: Path, cwd: Path, latex_source: str
     ) -> Tuple[bool, str, Optional[str]]:
         """Runs the full compilation cycle: (xelatex + bibtex) × 2."""
+        env = self._build_env()
 
         # 1. First xelatex pass (generate .aux for bibtex)
-        success, log, error = self._run_single_pass(engine, source_file, cwd)
+        success, log, error = self._run_single_pass(engine, source_file, cwd, env=env)
         # Don't fail on first pass - references will be unresolved
 
         # 2. Check for existing .bbl file (pre-compiled bibliography)
@@ -943,21 +1140,21 @@ class LaTeXCompiler:
 
         # 3. Run bibtex (always try if bibliography command exists)
         bib_tool = self._detect_bibliography_tool(latex_source)
-        if bib_tool and shutil.which(bib_tool):
-            self._run_bibliography_tool(bib_tool, cwd)
+        if bib_tool and self._which(bib_tool, env):
+            self._run_bibliography_tool(bib_tool, cwd, env=env)
 
         # 4. Second xelatex pass (incorporate bibliography)
-        self._run_single_pass(engine, source_file, cwd)
+        self._run_single_pass(engine, source_file, cwd, env=env)
 
         # 5. Run bibtex again (resolve any new citations)
-        if bib_tool and shutil.which(bib_tool):
-            self._run_bibliography_tool(bib_tool, cwd)
+        if bib_tool and self._which(bib_tool, env):
+            self._run_bibliography_tool(bib_tool, cwd, env=env)
 
         # 6. Third xelatex pass (resolve all cross-references)
-        self._run_single_pass(engine, source_file, cwd)
+        self._run_single_pass(engine, source_file, cwd, env=env)
 
         # 7. Fourth xelatex pass (final - ensure all references resolved)
-        success, log, error = self._run_single_pass(engine, source_file, cwd)
+        success, log, error = self._run_single_pass(engine, source_file, cwd, env=env)
 
         return success, log, error
 
@@ -1285,7 +1482,13 @@ class LaTeXCompiler:
             return patched_source, "fallback_disable_microtype_tracking", True
         return latex_source, "no_fallback", False
 
-    def _run_bibliography_tool(self, tool: str, cwd: Path) -> bool:
+    def _run_bibliography_tool(
+        self,
+        tool: str,
+        cwd: Path,
+        *,
+        env: Optional[Dict[str, str]] = None,
+    ) -> bool:
         cmd = [tool, "main"]
         try:
             subprocess.run(
@@ -1295,13 +1498,19 @@ class LaTeXCompiler:
                 timeout=60,
                 encoding="utf-8",
                 errors="replace",
+                env=env or self._build_env(),
             )
             return True
         except Exception:
             return False
 
     def _run_single_pass(
-        self, engine: str, source_file: Path, cwd: Path
+        self,
+        engine: str,
+        source_file: Path,
+        cwd: Path,
+        *,
+        env: Optional[Dict[str, str]] = None,
     ) -> Tuple[bool, str, Optional[str]]:
         """Runs a single pass of the latex engine."""
         cmd = [
@@ -1328,7 +1537,7 @@ class LaTeXCompiler:
                 timeout=self.timeout,
                 encoding="utf-8",
                 errors="replace",
-                env=self._build_env(),
+                env=env or self._build_env(),
             )
 
             # Read log file if it exists, as it's more complete than stdout

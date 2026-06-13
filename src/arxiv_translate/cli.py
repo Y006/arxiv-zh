@@ -620,7 +620,10 @@ def translate(
             # 3. Translate
             console.print("\n[bold]Translating...[/bold]")
             glossary = load_glossary()
-            provider_kwargs: dict[str, Any] = {"temperature": config.llm.temperature}
+            provider_kwargs: dict[str, Any] = {
+                "temperature": config.llm.temperature,
+                "max_tokens": config.llm.max_tokens,
+            }
             if sdk_name in ("openai-coding", "anthropic-coding"):
                 provider_kwargs["full_glossary"] = glossary
 
@@ -869,6 +872,15 @@ def translate(
                     compiler = LaTeXCompiler(
                         timeout=config.compilation.timeout,
                         fonts_dir=config.fonts.dir,
+                        use_tinytex=config.compilation.use_tinytex,
+                        tinytex_paths=config.compilation.tinytex_paths,
+                        install_missing_packages=(
+                            config.compilation.install_missing_packages
+                        ),
+                        install_timeout=config.compilation.install_timeout,
+                        max_package_install_rounds=(
+                            config.compilation.max_package_install_rounds
+                        ),
                     )
                     compile_error: Optional[str] = None
                     try:
@@ -970,6 +982,7 @@ def _run_arxiv_zh_pipeline(
                 key=options.api_key,
                 endpoint=options.endpoint,
                 temperature=config.llm.temperature,
+                max_tokens=config.llm.max_tokens,
             )
 
             try:
@@ -1097,13 +1110,20 @@ def _run_arxiv_zh_pipeline(
                 compiler = LaTeXCompiler(
                     timeout=config.compilation.timeout,
                     fonts_dir=config.fonts.dir,
+                    use_tinytex=config.compilation.use_tinytex,
+                    tinytex_paths=config.compilation.tinytex_paths,
+                    install_missing_packages=config.compilation.install_missing_packages,
+                    install_timeout=config.compilation.install_timeout,
+                    max_package_install_rounds=(
+                        config.compilation.max_package_install_rounds
+                    ),
                 )
                 result = compiler.compile_file(
                     translated_tex_path,
                     layout.pdf_dir / "main_zh.pdf",
                     logs_dir=layout.logs_dir,
                     build_dir=layout.root / "build",
-                    prefer_latexmk=True,
+                    prefer_latexmk=config.compilation.prefer_latexmk,
                     engine_policy=config.compilation.engine_policy,
                     fallback_engines=config.compilation.fallback_engines,
                     allow_pdflatex_cjk=config.compilation.allow_pdflatex_cjk,
@@ -1204,7 +1224,7 @@ def config_show():
 def config_set(key: str, value: str):
     """
     Set a configuration value (dot-separated).
-    Example: arx config set llm.models deepseek-chat
+    Example: arx config set llm.models deepseek-v4-flash
     """
     config_file = ensure_config_dir() / "config.yaml"
 
@@ -1322,6 +1342,7 @@ def ping(
                 key=key_val,
                 endpoint=endpoint_val,
                 temperature=config.llm.temperature,
+                max_tokens=config.llm.max_tokens,
             )
             start = time.perf_counter()
             result = await provider.ping()

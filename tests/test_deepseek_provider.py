@@ -8,7 +8,7 @@ def test_deepseek_provider_uses_env_key_and_defaults(monkeypatch):
 
     provider = DeepSeekProvider()
 
-    assert provider.model == "deepseek-chat"
+    assert provider.model == "deepseek-v4-flash"
     assert provider.api_key == "sk-deepseek-test"
     assert provider.base_url == "https://api.deepseek.com"
 
@@ -66,7 +66,7 @@ def test_factory_builds_deepseek_provider(monkeypatch):
 
     provider = translator_mod.get_sdk_client(
         "deepseek",
-        model="deepseek-chat",
+        model="deepseek-v4-flash",
         key=None,
         endpoint=None,
         temperature=0.1,

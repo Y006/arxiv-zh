@@ -122,7 +122,7 @@ def test_arxiv_zh_options_come_from_single_config(monkeypatch, tmp_path: Path):
         tmp_path / "config.yaml",
         """
         llm:
-          models: deepseek-reasoner
+          models: deepseek-v4-pro
           endpoint: https://api.deepseek.com
         translation:
           concurrency: 5
@@ -150,7 +150,7 @@ def test_arxiv_zh_options_come_from_single_config(monkeypatch, tmp_path: Path):
     assert options.concurrency == 5
     assert options.max_chunks == 2
     assert options.compile_pdf is True
-    assert options.model == "deepseek-reasoner"
+    assert options.model == "deepseek-v4-pro"
     assert config.fonts.dir == str(fonts_dir)
     assert config.fonts.main == "STSong"
     assert config.fonts.sans == "STXihei"
@@ -276,12 +276,12 @@ def test_config_set_writes_valid_schema_key(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     runner = CliRunner()
 
-    result = runner.invoke(app, ["config", "set", "llm.models", "deepseek-reasoner"])
+    result = runner.invoke(app, ["config", "set", "llm.models", "deepseek-v4-pro"])
 
     assert result.exit_code == 0
     config_path = tmp_path / "xdg" / "arxiv-translate" / "config.yaml"
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert data["llm"]["models"] == "deepseek-reasoner"
+    assert data["llm"]["models"] == "deepseek-v4-pro"
 
 
 def test_config_set_rejects_unknown_schema_key(monkeypatch, tmp_path: Path):

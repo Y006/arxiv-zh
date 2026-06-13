@@ -1,5 +1,4 @@
 # pyright: reportPossiblyUnboundVariable=false, reportOptionalMemberAccess=false
-import os
 from typing import Optional, Dict, List, Any, cast
 from .llm_base import LLMProvider
 from .prompts import build_system_prompt
@@ -89,11 +88,15 @@ class OpenAIProvider(LLMProvider):
         messages.append({"role": "user", "content": text})
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=self.kwargs.get("temperature", 0.3),
-            )
+            request_kwargs: Dict[str, Any] = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": self.kwargs.get("temperature", 0.3),
+            }
+            max_tokens = self.kwargs.get("max_tokens")
+            if max_tokens is not None:
+                request_kwargs["max_tokens"] = max_tokens
+            response = await self.client.chat.completions.create(**request_kwargs)
             content = cast(str, response.choices[0].message.content or "")
             return content.strip()
         except Exception as e:

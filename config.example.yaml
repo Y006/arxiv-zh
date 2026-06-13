@@ -1,19 +1,19 @@
 llm:
   sdk: deepseek
-  models: deepseek-chat
+  models: deepseek-v4-flash
   endpoint: https://api.deepseek.com
   key: null
   key_env: DEEPSEEK_API_KEY
   temperature: 0.1
-  max_tokens: 4000
+  max_tokens: 65536
 
 translation:
   concurrency: 3
   max_chunks: null
   quality_mode: standard
   examples_path: null
-  batch_short_threshold: 300
-  batch_max_chars: 2000
+  batch_short_threshold: 1500
+  batch_max_chars: 24000
   custom_system_prompt: null
   custom_user_prompt: null
   preserve_terms: []
@@ -32,8 +32,9 @@ fonts:
 compilation:
   enabled: true
   engine: xelatex
-  timeout: 120
+  timeout: 600
   clean_aux: true
+  prefer_latexmk: true
   engine_policy: auto
   fallback_engines:
     - xelatex
@@ -42,6 +43,16 @@ compilation:
   allow_shell_escape: false
   max_repair_rounds: 3
   chinese_package: auto
+  use_tinytex: true
+  tinytex_paths:
+    - ~/Library/TinyTeX/bin/universal-darwin
+    - ~/.TinyTeX/bin/*
+    - ~/TinyTeX/bin/*
+    - /Library/TinyTeX/bin/universal-darwin
+    - /Library/TeX/texbin
+  install_missing_packages: true
+  install_timeout: 1200
+  max_package_install_rounds: 8
 
 parser:
   extra_protected_environments: []

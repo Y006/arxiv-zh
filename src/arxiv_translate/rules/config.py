@@ -12,7 +12,7 @@ class StrictConfigModel(BaseModel):
 
 class LLMConfig(StrictConfigModel):
     sdk: Optional[str] = "deepseek"
-    models: Union[str, List[str]] = "deepseek-chat"
+    models: Union[str, List[str]] = "deepseek-v4-flash"
     key: Optional[str] = None
     key_env: Optional[str] = "DEEPSEEK_API_KEY"
     endpoint: Optional[str] = None
@@ -61,14 +61,28 @@ class LLMConfig(StrictConfigModel):
 class CompilationConfig(StrictConfigModel):
     enabled: bool = False
     engine: str = "xelatex"
-    timeout: int = 120
+    timeout: int = 600
     clean_aux: bool = True
+    prefer_latexmk: bool = True
     engine_policy: str = "auto"
     fallback_engines: List[str] = Field(default_factory=lambda: ["xelatex", "lualatex"])
     allow_pdflatex_cjk: bool = False
     allow_shell_escape: bool = False
     max_repair_rounds: int = 3
     chinese_package: str = "auto"
+    use_tinytex: bool = True
+    tinytex_paths: List[str] = Field(
+        default_factory=lambda: [
+            "~/Library/TinyTeX/bin/universal-darwin",
+            "~/.TinyTeX/bin/*",
+            "~/TinyTeX/bin/*",
+            "/Library/TinyTeX/bin/universal-darwin",
+            "/Library/TeX/texbin",
+        ]
+    )
+    install_missing_packages: bool = True
+    install_timeout: int = 1200
+    max_package_install_rounds: int = 8
 
     @field_validator("engine_policy")
     @classmethod
@@ -106,6 +120,20 @@ class CompilationConfig(StrictConfigModel):
     def validate_max_repair_rounds(cls, v):
         if v < 0:
             raise ValueError("max_repair_rounds must be non-negative")
+        return v
+
+    @field_validator("timeout", "install_timeout")
+    @classmethod
+    def validate_positive_timeout(cls, v):
+        if v < 1:
+            raise ValueError("timeout values must be positive")
+        return v
+
+    @field_validator("max_package_install_rounds")
+    @classmethod
+    def validate_max_package_install_rounds(cls, v):
+        if v < 0:
+            raise ValueError("max_package_install_rounds must be non-negative")
         return v
 
 

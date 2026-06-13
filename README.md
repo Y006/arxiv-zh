@@ -1,6 +1,6 @@
 # arxiv-zh
 
-`arxiv-zh` 是一个面向本地使用的 arXiv LaTeX 论文中文翻译 CLI。它下载 arXiv 源码、解析可翻译文本块、调用 DeepSeek 翻译、重组 LaTeX，并可用 XeLaTeX 编译中文 PDF。
+`arxiv-zh` 是一个面向本地使用的 arXiv LaTeX 论文中文翻译 CLI。它下载 arXiv 源码、解析可翻译文本块、调用 DeepSeek 翻译、重组 LaTeX，并可用 XeLaTeX 编译中文 PDF，它对agent的支持很友好。
 
 ## 快速开始
 
@@ -19,7 +19,30 @@ uv run arxiv-zh 2501.12345 --config config.yaml
 
 主入口是 `arxiv-zh`。`arx` 和 `arxiv-translate` 仍作为上游兼容入口保留。
 
-## 输出结构
+## 输入和输出
+
+输入：
+
+```bash
+
+>>> uv run arxiv-zh --help
+                                                                     
+ Usage: arxiv-zh [OPTIONS] [ARXIV_ID]                                
+                                                                     
+╭─ Arguments ───────────────────────────────────────────────────────╮
+│   arxiv_id      [ARXIV_ID]  arXiv ID or URL                       │
+╰───────────────────────────────────────────────────────────────────╯
+╭─ Options ─────────────────────────────────────────────────────────╮
+│ --config        PATH  Config YAML path. Defaults are used when    │
+│                       omitted.                                    │
+│ --doctor              Run environment checks and exit.            │
+│ --help                Show this message and exit.                 │
+╰───────────────────────────────────────────────────────────────────╯
+
+
+```
+
+输出目录：
 
 ```text
 output/arxiv-<arxiv_id>/
@@ -45,50 +68,8 @@ export DEEPSEEK_API_KEY=sk-...
 
 完整配置模板见 `config.example.yaml`。默认用户配置目录是 `~/.config/arxiv-translate/`；生产使用建议显式传 `--config config.yaml`。默认模型为 `deepseek-v4-flash`。
 
-项目保留三枚默认 CJK 字体：
-
-```text
-fonts/STSONG.TTF
-fonts/STXIHEI.TTF
-fonts/STKAITI.TTF
-```
+项目保留三枚默认 CJK 字体：`fonts/STSONG.TTF`、`fonts/STXIHEI.TTF`、`fonts/STKAITI.TTF`
 
 如果配置里的 `fonts.auto_detect` 为 `true`，CLI 会优先扫描配置中的 `fonts.dir`，再回退到项目 `fonts/` 和系统字体。
 
 编译默认按 TinyTeX 优先适配：配置会把常见 TinyTeX bin 目录加入 `PATH`，优先使用 `latexmk + xelatex`，遇到缺失 `.sty` / `.cls` 等文件时会尝试通过 `tlmgr search` 和 `tlmgr install` 自动安装缺包。首次编译需要下载包时可能较慢，`config.example.yaml` 已将编译超时放宽到 600 秒、缺包安装超时放宽到 1200 秒。
-
-## 核心流程
-
-1. 下载 arXiv 源码并定位主 `.tex`。
-2. 保护公式、引用、标签、作者块等不应翻译的结构。
-3. 提取标题、章节、caption、可翻译环境和正文段落为 chunk。
-4. 调用 LLM 翻译，支持本地缓存和占位符校验。
-5. 将译文重组回 LaTeX。
-6. 可选编译 `translated/main_zh.tex` 为 PDF。
-
-## 仓库结构
-
-```text
-src/arxiv_translate/
-├── cli.py
-├── downloader/
-├── parser/
-├── translator/
-├── compiler/
-├── validator/
-├── cache/
-├── rules/
-└── defaults/
-```
-
-## 验证
-
-```bash
-uv run arxiv-zh --doctor --config config.yaml
-uv run --extra dev pytest
-uv run arxiv-zh --help
-```
-
-## License
-
-GPL-3.0-or-later

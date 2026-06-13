@@ -1,41 +1,103 @@
 # AGENTS.md
 
-## arxiv-zh 本地使用速记
+## arxiv-zh agent 协助规则
 
-- 当前本地主入口是 `arxiv-zh`；在开发环境里优先使用 `uv run arxiv-zh ...`。
-- 生产使用建议显式传入配置文件：
-  ```bash
-  uv run arxiv-zh <arxiv_id_or_url> --config config.yaml
-  ```
-- 本地首次使用：
-  ```bash
-  uv sync
-  cp .env.example .env
-  cp config.example.yaml config.yaml
-  ```
-- DeepSeek 密钥可写入项目根目录 `.env`，或通过 shell 环境变量提供：
-  ```bash
-  export DEEPSEEK_API_KEY=sk-...
-  ```
-- 默认只支持 DeepSeek；默认模型以 `config.yaml` / `config.example.yaml` 中的 `llm.models` 为准。
-- 快速验证命令：
-  ```bash
-  uv run arxiv-zh 2501.12345 --config config.yaml
-  ```
-- URL 输入也会先解析为 arXiv ID：
-  ```bash
-  uv run arxiv-zh https://arxiv.org/html/2410.24164v1 --config config.yaml
-  ```
-- 默认输出目录格式：
-  ```text
-  output/arxiv-<arxiv_id>/
-  ```
-- 编译策略：
-  - 优先 `latexmk + xelatex`
-  - 失败后会进行安全修复并回退到 `lualatex`
-  - `pdflatex` 默认不用来编译含中文文档，除非配置显式开启
-- 编译诊断优先看：
-  - `logs/compile_attempts.json`
-  - `logs/compile_error_summary.md`
-  - `logs/compile.log`
-- 如果自动修复后的译文成功编译，`translated/` 下可能额外出现 `main_zh.before_compile.tex` 备份文件。
+本文件用于指导 agent 协助用户本地运行、配置和排错 `arxiv-zh`。
+
+## 1. 优先运行环境诊断
+
+当用户询问如何运行、配置或排错时，agent 应优先运行：
+
+```bash
+uv run arxiv-zh --doctor --config config.yaml
+````
+
+## 2. DeepSeek 和 API Key 规则
+
+当前版本仅支持 DeepSeek。
+
+项目通过根目录 `.env` 读取 DeepSeek API Key。agent 可以提示用户执行：
+
+```bash
+cp .env.example .env
+```
+
+然后让用户自行打开 `.env` 填写：
+
+```env
+DEEPSEEK_API_KEY=你的 DeepSeek API Key
+```
+
+agent 不应替用户填写、保存、回显真实 API Key，也不要要求用户把完整密钥发到聊天中。
+
+## 3. TeX 环境规则
+
+如果 `--doctor` 检查发现缺少 `latexmk`、`xelatex` 或 `lualatex`，agent 应判断当前环境可能无法正常编译 PDF。
+
+此时应建议用户安装 TinyTeX：
+
+```text
+https://yihui.org/tinytex/
+```
+
+只有在用户明确同意后，agent 才能协助安装 TinyTeX。不得未经确认自动安装 TeX 发行版。
+
+## 4. 配置解释规则
+
+agent可以帮助用户配置config.yaml文件，询问用户选用默认配置（直接复制example）还是要查看配置项自己配置？如果用户询问配置含义，或修改 `config.yaml` 后需要确认配置时，agent 应询问：需要我解释当前 config.yaml 的配置含义吗？如果用户需要，应读取当前配置，并用表格说明，下面是表格样式例子，具体要读取config.yaml文件。
+
+| 配置项                           | 当前值  | 中文解释                           |
+| ----------------------------- | ---- | ------------------------------ |
+| `llm.sdk`                     | 读取配置 | 当前使用的 LLM SDK；当前版本仅支持 DeepSeek |
+| `llm.models`                  | 读取配置 | 调用的 DeepSeek 模型                |
+
+解释时应说明配置对速度、稳定性、翻译质量或编译结果的影响，不要只复述字段名。
+
+## 5. 排错规则
+
+编译失败、PDF 没生成或 LaTeX 报错时，优先查看：
+
+```text
+logs/compile_error_summary.md
+logs/compile_attempts.json
+logs/compile.log
+```
+
+翻译不完整、英文残留或 LaTeX 结构异常时，优先查看：
+
+```text
+translation_report.md
+```
+
+常见审计信息含义：
+
+```text
+placeholder audit   占位符可能被破坏
+brace audit         LaTeX 花括号结构可能异常
+line_end audit      行尾结构可能异常
+untranslated audit  可能存在未翻译内容
+```
+
+如果出现：
+
+```text
+brace retry exhausted
+```
+
+表示部分 chunk 多次修复后仍未完全通过括号检查，程序会保留最后一次翻译结果。此时应检查对应 chunk 或最终 `.tex` 文件。
+
+## 6. agent 行为边界
+
+agent 应优先自己运行 `--doctor`、读取配置和查看日志，不要把机械检查步骤交给用户。
+
+涉及以下行为时，必须先说明影响并等待用户确认：
+
+* 安装 TinyTeX
+* 修改 `.env`
+* 修改 `config.yaml`
+* 删除输出目录
+* 清理缓存
+* 重新编译
+* 重新翻译
+
+涉及 API Key 时，只说明 `.env` 配置方法，不索要、不保存、不回显完整密钥。

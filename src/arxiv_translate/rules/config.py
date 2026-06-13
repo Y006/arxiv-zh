@@ -50,6 +50,50 @@ class CompilationConfig(BaseModel):
     engine: str = "xelatex"
     timeout: int = 120
     clean_aux: bool = True
+    engine_policy: str = "auto"
+    fallback_engines: List[str] = Field(default_factory=lambda: ["xelatex", "lualatex"])
+    allow_pdflatex_cjk: bool = False
+    allow_shell_escape: bool = False
+    max_repair_rounds: int = 3
+    chinese_package: str = "auto"
+
+    @field_validator("engine_policy")
+    @classmethod
+    def validate_engine_policy(cls, v):
+        allowed = {"auto", "xelatex", "lualatex", "pdflatex"}
+        if v not in allowed:
+            raise ValueError(
+                f"engine_policy must be one of {sorted(allowed)}, got '{v}'"
+            )
+        return v
+
+    @field_validator("fallback_engines")
+    @classmethod
+    def validate_fallback_engines(cls, v):
+        allowed = {"xelatex", "lualatex", "pdflatex"}
+        invalid = [engine for engine in v if engine not in allowed]
+        if invalid:
+            raise ValueError(
+                f"fallback_engines contains unsupported engine(s): {invalid}"
+            )
+        return v
+
+    @field_validator("chinese_package")
+    @classmethod
+    def validate_chinese_package(cls, v):
+        allowed = {"auto", "xeCJK", "luatexja", "ctex", "CJKutf8"}
+        if v not in allowed:
+            raise ValueError(
+                f"chinese_package must be one of {sorted(allowed)}, got '{v}'"
+            )
+        return v
+
+    @field_validator("max_repair_rounds")
+    @classmethod
+    def validate_max_repair_rounds(cls, v):
+        if v < 0:
+            raise ValueError("max_repair_rounds must be non-negative")
+        return v
 
 
 class PathsConfig(BaseModel):

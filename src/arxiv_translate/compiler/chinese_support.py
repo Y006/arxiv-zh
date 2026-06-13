@@ -20,6 +20,8 @@ _ENGINE_CONFLICT_PATTERN = re.compile(
 _CJK_CHAR_CLASS = "\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef"
 _UNICODE_ENGINE_DRIVER_OPTIONS = {"pdftex", "dvips", "dvipdfmx", "xetex", "luatex"}
 _DRIVER_OPTION_PACKAGES = {"graphicx", "graphics", "color", "xcolor", "hyperref"}
+_UNICODE_ENGINES = {"xelatex", "lualatex"}
+_CHINESE_PACKAGE_CHOICES = {"auto", "xeCJK", "luatexja", "ctex", "CJKutf8"}
 
 
 def _find_matching_brace(text: str, open_index: int) -> Optional[int]:
@@ -190,6 +192,11 @@ def normalize_unicode_engine_source(latex_source: str) -> str:
     return latex_source
 
 
+def contains_cjk_text(latex_source: str) -> bool:
+    """Return whether the source contains CJK or full-width characters."""
+    return bool(re.search(rf"[{_CJK_CHAR_CLASS}]", latex_source or ""))
+
+
 FONT_FILE_SUFFIXES = {".ttf", ".ttc", ".otf"}
 
 
@@ -334,6 +341,246 @@ def detect_cjk_fonts(available_fonts: List[str]) -> Dict[str, str]:
     }
 
 
+def _config_value(config: Optional[Any], key: str, default: Any = None) -> Any:
+    if config is None:
+        return default
+    if isinstance(config, dict):
+        return config.get(key, default)
+    return getattr(config, key, default)
+
+
+def _font_available(font_name: Optional[str], available_fonts: List[str]) -> bool:
+    if not font_name:
+        return False
+    font_key = font_name.lower()
+    return any(
+        font_key == available.lower() or font_key in available.lower()
+        for available in available_fonts
+    )
+
+
+def _resolved_font_commands(
+    font_config: Optional[Any],
+    *,
+    engine: str,
+    font_dir: Optional[Union[str, Path]] = None,
+) -> List[str]:
+    """Build engine-specific font commands only for configured or detected fonts."""
+    cfg_main = _config_value(font_config, "main")
+    cfg_sans = _config_value(font_config, "sans")
+    cfg_mono = _config_value(font_config, "mono")
+    cfg_dir = font_dir or _config_value(font_config, "dir")
+    use_auto = bool(_config_value(font_config, "auto_detect", True))
+
+    available = get_available_fonts(cfg_dir) if use_auto else []
+    detected = detect_cjk_fonts(available) if available else {}
+
+    def choose(configured: Optional[str], detected_key: str) -> Optional[str]:
+        if configured:
+            return configured
+        candidate = detected.get(detected_key)
+        if candidate and _font_available(candidate, available):
+            return candidate
+        return None
+
+    main_font = choose(cfg_main, "main")
+    sans_font = choose(cfg_sans, "sans")
+    mono_font = choose(cfg_mono, "mono")
+
+    if engine == "lualatex":
+        commands = []
+        if main_font:
+            commands.append(f"\\setmainjfont{{{main_font}}}")
+        if sans_font:
+            commands.append(f"\\setsansjfont{{{sans_font}}}")
+        if mono_font:
+            commands.append(f"\\setmonojfont{{{mono_font}}}")
+        return commands
+
+    commands = []
+    if main_font:
+        commands.append(f"\\setCJKmainfont{{{main_font}}}")
+    if sans_font:
+        commands.append(f"\\setCJKsansfont{{{sans_font}}}")
+    if mono_font:
+        commands.append(f"\\setCJKmonofont{{{mono_font}}}")
+    return commands
+
+
+def _remove_unicode_input_packages(latex_source: str) -> str:
+    latex_source = re.sub(
+        r"^[ \t]*\\usepackage\s*\[T1\]\s*\{fontenc\}\s*\n?",
+        "",
+        latex_source,
+        flags=re.MULTILINE,
+    )
+    latex_source = re.sub(
+        r"^[ \t]*\\usepackage\s*\[utf8\]\s*\{inputenc\}\s*\n?",
+        "",
+        latex_source,
+        flags=re.MULTILINE,
+    )
+    return latex_source
+
+
+def _package_present(latex_source: str, package_name: str) -> bool:
+    return bool(
+        re.search(
+            rf"\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{{{re.escape(package_name)}\}}",
+            latex_source,
+        )
+    )
+
+
+def _strip_engine_specific_chinese_support(latex_source: str, *, keep: str) -> str:
+    """Remove Chinese-support commands that are incompatible with the target engine."""
+    package_lines = {
+        "xeCJK": r"^[ \t]*\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{xeCJK\}[ \t]*\n?",
+        "luatexja": r"^[ \t]*\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{luatexja-fontspec\}[ \t]*\n?",
+        "CJKutf8": r"^[ \t]*\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{CJKutf8\}[ \t]*\n?",
+    }
+    font_lines = {
+        "xeCJK": r"^[ \t]*\\setCJK(?:main|sans|mono)font(?:\[[^\]]*\])?\{[^}]*\}[ \t]*\n?",
+        "luatexja": r"^[ \t]*\\set(?:main|sans|mono)jfont(?:\[[^\]]*\])?\{[^}]*\}[ \t]*\n?",
+    }
+
+    patched = latex_source
+    for package_key, pattern in package_lines.items():
+        if package_key != keep:
+            patched = re.sub(pattern, "", patched, flags=re.MULTILINE)
+    for package_key, pattern in font_lines.items():
+        if package_key != keep:
+            patched = re.sub(pattern, "", patched, flags=re.MULTILINE)
+    if keep != "CJKutf8":
+        patched = re.sub(r"^[ \t]*\\begin\{CJK\}\{UTF8\}\{[^}]*\}[ \t]*\n?", "", patched, flags=re.MULTILINE)
+        patched = re.sub(r"^[ \t]*\\end\{CJK\}[ \t]*\n?", "", patched, flags=re.MULTILINE)
+    return patched
+
+
+def _insert_after_documentclass_or_before_document(
+    latex_source: str,
+    insertion: str,
+) -> str:
+    docclass_match = re.search(
+        r"(\\documentclass\s*(?:\[[^\]]*\])?\s*\{[^}]+\}\s*\n?)", latex_source
+    )
+    if docclass_match:
+        insert_pos = docclass_match.end()
+        return latex_source[:insert_pos] + insertion + latex_source[insert_pos:]
+
+    begin_doc_match = re.search(r"\\begin\{document\}", latex_source)
+    if begin_doc_match:
+        insert_pos = begin_doc_match.start()
+        return latex_source[:insert_pos] + insertion + "\n" + latex_source[insert_pos:]
+
+    return latex_source + "\n" + insertion
+
+
+def _wrap_pdflatex_cjk_document(latex_source: str) -> str:
+    if "\\begin{CJK}" in latex_source:
+        return latex_source
+    begin_doc_match = re.search(r"\\begin\{document\}", latex_source)
+    end_doc_match = list(re.finditer(r"\\end\{document\}", latex_source))
+    if not begin_doc_match or not end_doc_match:
+        return latex_source
+
+    end_match = end_doc_match[-1]
+    patched = (
+        latex_source[: begin_doc_match.end()]
+        + "\n\\begin{CJK}{UTF8}{gbsn}\n"
+        + latex_source[begin_doc_match.end() : end_match.start()]
+        + "\n\\end{CJK}\n"
+        + latex_source[end_match.start() :]
+    )
+    return patched
+
+
+def inject_chinese_support_for_engine(
+    latex_source: str,
+    *,
+    engine: str = "xelatex",
+    font_config: Optional[Any] = None,
+    allow_pdflatex_cjk: bool = False,
+    chinese_package: str = "auto",
+    font_dir: Optional[Union[str, Path]] = None,
+) -> str:
+    """Inject Chinese support that matches the selected LaTeX engine."""
+    engine = (engine or "xelatex").lower()
+    if chinese_package not in _CHINESE_PACKAGE_CHOICES:
+        chinese_package = "auto"
+
+    latex_source = normalize_unicode_engine_source(latex_source)
+
+    if engine in _UNICODE_ENGINES:
+        latex_source = _remove_unicode_input_packages(latex_source)
+
+    if chinese_package == "ctex":
+        latex_source = _strip_engine_specific_chinese_support(latex_source, keep="ctex")
+        if _package_present(latex_source, "ctex"):
+            return latex_source
+        return _insert_after_documentclass_or_before_document(
+            latex_source,
+            "\n% Auto-injected Chinese Support\n\\usepackage[UTF8]{ctex}\n",
+        )
+
+    if engine == "lualatex":
+        latex_source = _strip_engine_specific_chinese_support(
+            latex_source,
+            keep="luatexja",
+        )
+        if _package_present(latex_source, "luatexja-fontspec"):
+            return latex_source
+        font_commands = _resolved_font_commands(
+            font_config,
+            engine="lualatex",
+            font_dir=font_dir,
+        )
+        injection_lines = [
+            "",
+            "% Auto-injected Chinese Support",
+            r"\usepackage{luatexja-fontspec}",
+            *font_commands,
+        ]
+        return _insert_after_documentclass_or_before_document(
+            latex_source,
+            "\n".join(injection_lines) + "\n",
+        )
+
+    if engine == "pdflatex":
+        latex_source = _strip_engine_specific_chinese_support(
+            latex_source,
+            keep="CJKutf8" if allow_pdflatex_cjk else "pdflatex",
+        )
+        if not allow_pdflatex_cjk:
+            return latex_source
+        if not _package_present(latex_source, "CJKutf8"):
+            latex_source = _insert_after_documentclass_or_before_document(
+                latex_source,
+                "\n% Auto-injected Chinese Support\n\\usepackage{CJKutf8}\n",
+            )
+        return _wrap_pdflatex_cjk_document(latex_source)
+
+    latex_source = _strip_engine_specific_chinese_support(latex_source, keep="xeCJK")
+    if _package_present(latex_source, "xeCJK"):
+        return latex_source
+    font_commands = _resolved_font_commands(
+        font_config,
+        engine="xelatex",
+        font_dir=font_dir,
+    )
+    injection_lines = [
+        "",
+        "% Auto-injected Chinese Support",
+        r"\usepackage{fontspec}",
+        r"\usepackage{xeCJK}",
+        *font_commands,
+    ]
+    return _insert_after_documentclass_or_before_document(
+        latex_source,
+        "\n".join(injection_lines) + "\n",
+    )
+
+
 def inject_chinese_support(latex_source: str, font_config: Optional[Any] = None) -> str:
     r"""
     Injects xeCJK package and Noto CJK font settings into the LaTeX source.
@@ -349,82 +596,8 @@ def inject_chinese_support(latex_source: str, font_config: Optional[Any] = None)
     Returns:
         str: The modified LaTeX source code with Chinese support injected.
     """
-    latex_source = normalize_unicode_engine_source(latex_source)
-
-    # Check if xeCJK is already present to avoid duplication
-    if "xeCJK" in latex_source:
-        return latex_source
-
-    # Default: auto-detect fonts
-    avail = get_available_fonts()
-    detected = detect_cjk_fonts(avail)
-    main_font = detected["main"]
-    sans_font = detected["sans"]
-    mono_font = detected["mono"]
-
-    # Override with config if provided
-    if font_config:
-        # Support both Pydantic model and dict
-        if isinstance(font_config, dict):
-            cfg_main = font_config.get("main")
-            cfg_sans = font_config.get("sans")
-            cfg_mono = font_config.get("mono")
-            use_auto = font_config.get("auto_detect", True)
-        else:
-            # Assume Pydantic model
-            cfg_main = getattr(font_config, "main", None)
-            cfg_sans = getattr(font_config, "sans", None)
-            cfg_mono = getattr(font_config, "mono", None)
-            use_auto = getattr(font_config, "auto_detect", True)
-
-        # If auto_detect is disabled, use configured fonts
-        if not use_auto:
-            if cfg_main:
-                main_font = cfg_main
-            if cfg_sans:
-                sans_font = cfg_sans
-            if cfg_mono:
-                mono_font = cfg_mono
-        else:
-            # Auto-detect is enabled, but override with any explicitly set fonts
-            if cfg_main:
-                main_font = cfg_main
-            if cfg_sans:
-                sans_font = cfg_sans
-            if cfg_mono:
-                mono_font = cfg_mono
-
-    latex_source = re.sub(
-        r"\\usepackage\s*\[T1\]\s*\{fontenc\}\s*\n?", "", latex_source
+    return inject_chinese_support_for_engine(
+        latex_source,
+        engine="xelatex",
+        font_config=font_config,
     )
-    latex_source = re.sub(
-        r"\\usepackage\s*\[utf8\]\s*\{inputenc\}\s*\n?", "", latex_source
-    )
-    latex_source = re.sub(
-        r"\\usepackage\s*\[utf8\]\s*\{inputenc\}\s*\n?", "", latex_source
-    )
-
-    injection = (
-        "\n% Auto-injected Chinese Support\n"
-        r"\usepackage{xeCJK}" + "\n"
-        f"\\setCJKmainfont{{{main_font}}}\n"
-        f"\\setCJKsansfont{{{sans_font}}}\n"
-        f"\\setCJKmonofont{{{mono_font}}}\n"
-    )
-
-    # Inject immediately after \documentclass (more canonical position)
-    docclass_match = re.search(
-        r"(\\documentclass\s*(?:\[[^\]]*\])?\s*\{[^}]+\}\s*\n?)", latex_source
-    )
-    if docclass_match:
-        insert_pos = docclass_match.end()
-        return latex_source[:insert_pos] + injection + latex_source[insert_pos:]
-
-    # Fallback: inject before \begin{document}
-    begin_doc_match = re.search(r"\\begin\{document\}", latex_source)
-    if begin_doc_match:
-        insert_pos = begin_doc_match.start()
-        return latex_source[:insert_pos] + injection + "\n" + latex_source[insert_pos:]
-
-    # Last resort: append at end if no \begin{document} found
-    return latex_source + "\n" + injection

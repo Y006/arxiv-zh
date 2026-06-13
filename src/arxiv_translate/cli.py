@@ -1135,6 +1135,13 @@ def _run_arxiv_zh_pipeline(
                     logs_dir=layout.logs_dir,
                     build_dir=layout.root / "build",
                     prefer_latexmk=True,
+                    engine_policy=config.compilation.engine_policy,
+                    fallback_engines=config.compilation.fallback_engines,
+                    allow_pdflatex_cjk=config.compilation.allow_pdflatex_cjk,
+                    allow_shell_escape=config.compilation.allow_shell_escape,
+                    max_repair_rounds=config.compilation.max_repair_rounds,
+                    chinese_package=config.compilation.chinese_package,
+                    font_config=config.fonts,
                 )
                 if not result.success:
                     error = result.error_message or "Compilation failed"

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -266,6 +267,116 @@ def test_compile_file_disables_bibtex_when_using_precompiled_bbl(
 
     assert result.success is True
     assert "-bibtex-" in captured["cmd"]
+
+
+def test_compile_file_falls_back_from_xelatex_to_lualatex(monkeypatch, tmp_path: Path):
+    build_dir = tmp_path / "build"
+    tex_file = tmp_path / "main_zh.tex"
+    original_source = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "中文\n"
+        "\\end{document}\n"
+    )
+    tex_file.write_text(original_source, encoding="utf-8")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        tex_arg = Path(cmd[-1])
+        if "-xelatex" in cmd:
+            return SimpleNamespace(
+                returncode=1,
+                stdout='Package fontspec Error: The font "Missing" cannot be found.',
+                stderr="",
+            )
+        build_dir.mkdir(parents=True, exist_ok=True)
+        (build_dir / f"{tex_arg.stem}.pdf").write_bytes(
+            b"%PDF-1.5\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+        )
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name == "latexmk" else None,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler().compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+        max_repair_rounds=0,
+    )
+
+    assert result.success is True
+    assert result.engine_used == "lualatex"
+    assert len(result.attempts) == 2
+    assert result.attempts[0].engine == "xelatex"
+    assert result.attempts[1].engine == "lualatex"
+    assert any("-lualatex" in call for call in calls)
+    assert (tmp_path / "main_zh.before_compile.tex").read_text(
+        encoding="utf-8"
+    ) == original_source
+    assert "\\usepackage{luatexja-fontspec}" in tex_file.read_text(encoding="utf-8")
+    assert result.diagnostic_path == tmp_path / "logs" / "compile_attempts.json"
+    data = json.loads(result.diagnostic_path.read_text(encoding="utf-8"))
+    assert [attempt["engine"] for attempt in data["attempts"]] == [
+        "xelatex",
+        "lualatex",
+    ]
+
+
+def test_compile_file_writes_attempt_diagnostics_when_all_engines_fail(
+    monkeypatch,
+    tmp_path: Path,
+):
+    build_dir = tmp_path / "build"
+    tex_file = tmp_path / "main_zh.tex"
+    original_source = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "中文\n"
+        "\\end{document}\n"
+    )
+    tex_file.write_text(original_source, encoding="utf-8")
+
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(
+            returncode=1,
+            stdout=(
+                "Package minted Error: You must invoke LaTeX with the "
+                "-shell-escape flag.\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name == "latexmk" else None,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler().compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+        max_repair_rounds=0,
+    )
+
+    assert result.success is False
+    assert tex_file.read_text(encoding="utf-8") == original_source
+    assert result.diagnostic_path == tmp_path / "logs" / "compile_attempts.json"
+    data = json.loads(result.diagnostic_path.read_text(encoding="utf-8"))
+    assert len(data["attempts"]) == 2
+    assert all(attempt["returncode"] == 1 for attempt in data["attempts"])
+    assert data["attempts"][0]["category"] == "shell_escape"
+    summary = (tmp_path / "logs" / "compile_error_summary.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Shell Escape Required" in summary
 
 
 def test_apply_missing_file_fallback_sets_bxcoloremoji_names_false(tmp_path: Path):

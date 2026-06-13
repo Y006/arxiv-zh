@@ -4,6 +4,7 @@ from arxiv_translate.compiler.chinese_support import (
     _strip_unicode_engine_driver_options,
     _unescape_reference_command_keys,
     inject_chinese_support,
+    inject_chinese_support_for_engine,
 )
 
 
@@ -146,3 +147,48 @@ def test_inject_chinese_support_strips_conflicts_before_xecjk_guard():
     assert "\\usepackage{graphicx}" in patched
     assert "\\ModelSymbol{}架构" in patched
     assert patched.count("\\usepackage{xeCJK}") == 1
+
+
+def test_inject_chinese_support_for_engine_uses_luatexja_for_lualatex():
+    source = (
+        "\\documentclass{article}\n"
+        "\\usepackage{xeCJK}\n"
+        "\\setCJKmainfont{Songti SC}\n"
+        "\\begin{document}\n"
+        "中文\n"
+        "\\end{document}\n"
+    )
+
+    patched = inject_chinese_support_for_engine(
+        source,
+        engine="lualatex",
+        font_config={"main": "FandolSong", "auto_detect": False},
+    )
+
+    assert "\\usepackage{luatexja-fontspec}" in patched
+    assert "\\setmainjfont{FandolSong}" in patched
+    assert "\\usepackage{xeCJK}" not in patched
+    assert "\\setCJKmainfont" not in patched
+
+
+def test_inject_chinese_support_for_engine_skips_pdflatex_cjk_by_default():
+    source = "\\documentclass{article}\n\\begin{document}\n中文\n\\end{document}\n"
+
+    patched = inject_chinese_support_for_engine(source, engine="pdflatex")
+
+    assert "\\usepackage{CJKutf8}" not in patched
+    assert "\\begin{CJK}" not in patched
+
+
+def test_inject_chinese_support_for_engine_can_wrap_pdflatex_cjk():
+    source = "\\documentclass{article}\n\\begin{document}\n中文\n\\end{document}\n"
+
+    patched = inject_chinese_support_for_engine(
+        source,
+        engine="pdflatex",
+        allow_pdflatex_cjk=True,
+    )
+
+    assert "\\usepackage{CJKutf8}" in patched
+    assert "\\begin{CJK}{UTF8}{gbsn}" in patched
+    assert "\\end{CJK}" in patched

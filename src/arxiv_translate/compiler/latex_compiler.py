@@ -1,16 +1,19 @@
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .chinese_support import (
     ENGINE_CONFLICT_PRIMITIVES,
     _strip_engine_conflict_primitives,
+    contains_cjk_text,
     inject_chinese_support,
+    inject_chinese_support_for_engine,
     normalize_unicode_engine_source,
 )
 
@@ -50,6 +53,30 @@ def build_compile_error_summary(log_content: str) -> str:
             "First Missing file",
             _first_log_context(lines, r"File\s+[`'][^`']+[`']\s+not\s+found"),
         ),
+        (
+            "First Font Error",
+            _first_log_context(lines, r"fontspec\s+Error|fontsp\s*ec\s+Error"),
+        ),
+        (
+            "First Package Error",
+            _first_log_context(lines, r"Package\s+[^\s:]+\s+Error:"),
+        ),
+        (
+            "First Unicode/CJK Error",
+            _first_log_context(lines, r"Unicode\s+character|CJK|xeCJK|luatexja"),
+        ),
+        (
+            "First Bibliography Error",
+            _first_log_context(lines, r"BibTeX|Biber|biblatex|I found no"),
+        ),
+        (
+            "First Engine Mismatch",
+            _first_log_context(lines, r"requires\s+(?:XeTeX|LuaTeX)|change your typesetting engine"),
+        ),
+        (
+            "Shell Escape Required",
+            _first_log_context(lines, r"shell-escape|write18|minted"),
+        ),
     ]
 
     output = ["# Compile Error Summary", ""]
@@ -86,12 +113,27 @@ def write_compile_error_summary(log_path: Path, summary_path: Path) -> Path:
 
 
 @dataclass
+class CompileAttempt:
+    engine: str
+    command: List[str]
+    tex_path: Optional[Path]
+    success: bool
+    returncode: Optional[int] = None
+    error: Optional[str] = None
+    category: str = "unknown"
+    repairs: List[str] = field(default_factory=list)
+
+
+@dataclass
 class CompilationResult:
     success: bool
     pdf_path: Optional[Path] = None
     log_content: Optional[str] = None
     error_message: Optional[str] = None
     engine_used: Optional[str] = None
+    attempts: List[CompileAttempt] = field(default_factory=list)
+    repaired_tex_path: Optional[Path] = None
+    diagnostic_path: Optional[Path] = None
 
 
 class LaTeXCompiler:
@@ -124,6 +166,13 @@ class LaTeXCompiler:
         logs_dir: Union[str, Path],
         build_dir: Optional[Union[str, Path]] = None,
         prefer_latexmk: bool = True,
+        engine_policy: str = "auto",
+        fallback_engines: Optional[List[str]] = None,
+        allow_pdflatex_cjk: bool = False,
+        allow_shell_escape: bool = False,
+        max_repair_rounds: int = 3,
+        chinese_package: str = "auto",
+        font_config: Optional[Any] = None,
     ) -> CompilationResult:
         """Compile an existing TeX file while preserving logs and build artifacts."""
         tex_file = Path(tex_file).resolve()
@@ -132,6 +181,7 @@ class LaTeXCompiler:
         build_path = Path(build_dir).resolve() if build_dir else logs_dir / "build"
         log_path = logs_dir / "compile.log"
         summary_path = logs_dir / "compile_error_summary.md"
+        diagnostic_path = logs_dir / "compile_attempts.json"
 
         logs_dir.mkdir(parents=True, exist_ok=True)
         build_path.mkdir(parents=True, exist_ok=True)
@@ -142,113 +192,170 @@ class LaTeXCompiler:
             message = f"TeX file not found: {tex_file}"
             log_path.write_text(message, encoding="utf-8")
             write_compile_error_summary(log_path, summary_path)
-            return CompilationResult(success=False, log_content=message, error_message=message)
+            return CompilationResult(
+                success=False,
+                log_content=message,
+                error_message=message,
+                diagnostic_path=diagnostic_path,
+            )
 
-        uses_precompiled_bbl = self._prepare_compile_inputs(tex_file, build_path)
+        try:
+            original_source = tex_file.read_text(encoding="utf-8")
+        except Exception as exc:
+            message = f"Unable to read TeX file: {exc}"
+            log_path.write_text(message, encoding="utf-8")
+            write_compile_error_summary(log_path, summary_path)
+            return CompilationResult(
+                success=False,
+                log_content=message,
+                error_message=message,
+                diagnostic_path=diagnostic_path,
+            )
 
-        def run_command(cmd: List[str]) -> Tuple[bool, str, Optional[str]]:
-            header = f"$ {' '.join(cmd)}\n"
-            with log_path.open("a", encoding="utf-8") as log_file:
-                log_file.write(header)
-            try:
-                process = subprocess.run(
+        prepared_source, uses_precompiled_bbl = self._prepare_compile_source(
+            tex_file,
+            build_path,
+            original_source=original_source,
+        )
+        attempts: List[CompileAttempt] = []
+        available_engines = self._select_compile_file_engines(
+            engine_policy=engine_policy,
+            fallback_engines=fallback_engines,
+            latex_source=prepared_source,
+            allow_pdflatex_cjk=allow_pdflatex_cjk,
+        )
+        if prefer_latexmk and shutil.which("latexmk"):
+            command_mode = "latexmk"
+        else:
+            command_mode = "direct"
+
+        if command_mode == "direct":
+            available_engines = [
+                engine for engine in available_engines if shutil.which(engine)
+            ]
+        if not available_engines:
+            message = "No usable LaTeX engine was found on PATH."
+            log_path.write_text(message, encoding="utf-8")
+            self._write_compile_attempts(diagnostic_path, attempts)
+            write_compile_error_summary(log_path, summary_path)
+            return CompilationResult(
+                success=False,
+                log_content=message,
+                error_message=message,
+                attempts=attempts,
+                diagnostic_path=diagnostic_path,
+            )
+
+        last_log = ""
+        last_error: Optional[str] = None
+        successful_source: Optional[str] = None
+        successful_candidate: Optional[Path] = None
+        successful_engine: Optional[str] = None
+
+        for engine in available_engines:
+            engine_source = inject_chinese_support_for_engine(
+                prepared_source,
+                engine=engine,
+                font_config=font_config,
+                allow_pdflatex_cjk=allow_pdflatex_cjk,
+                chinese_package=chinese_package,
+                font_dir=self.fonts_dir,
+            )
+            applied_repairs: List[str] = []
+
+            for round_index in range(max_repair_rounds + 1):
+                candidate = build_path / (
+                    f"{tex_file.stem}.{engine}.round{round_index + 1}.tex"
+                )
+                candidate.write_text(engine_source, encoding="utf-8")
+                cmd = self._build_compile_file_command(
+                    engine=engine,
+                    candidate=candidate,
+                    build_path=build_path,
+                    uses_precompiled_bbl=uses_precompiled_bbl,
+                    prefer_latexmk=(command_mode == "latexmk"),
+                    allow_shell_escape=allow_shell_escape,
+                )
+                (
+                    success,
+                    log_content,
+                    error,
+                    returncode,
+                ) = self._run_compile_file_command(
                     cmd,
                     cwd=tex_file.parent,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.timeout,
-                    encoding="utf-8",
-                    errors="replace",
-                    env=self._build_env(),
+                    log_path=log_path,
                 )
-                combined_log = process.stdout + "\n" + process.stderr
-                with log_path.open("a", encoding="utf-8") as log_file:
-                    log_file.write(combined_log)
-                    log_file.write("\n")
-                if process.returncode != 0:
-                    return (
-                        False,
-                        log_path.read_text(encoding="utf-8", errors="replace"),
-                        f"Compilation command exited with code {process.returncode}.",
+                last_log = log_content
+                last_error = error
+                attempt = CompileAttempt(
+                    engine=engine,
+                    command=cmd,
+                    tex_path=candidate,
+                    success=success,
+                    returncode=returncode,
+                    error=error,
+                    category=self._classify_compile_log(log_content, error),
+                    repairs=list(applied_repairs),
+                )
+                attempts.append(attempt)
+
+                built_pdf = self._find_built_pdf(
+                    build_path,
+                    candidate_stem=candidate.stem,
+                    tex_stem=tex_file.stem,
+                )
+                if success and built_pdf and self._is_pdf_healthy(built_pdf):
+                    shutil.copy2(built_pdf, output_path)
+                    if self._is_pdf_healthy(output_path):
+                        successful_source = engine_source
+                        successful_candidate = candidate
+                        successful_engine = engine
+                        self._sync_repaired_tex_on_success(
+                            tex_file,
+                            original_source,
+                            successful_source,
+                        )
+                        self._write_compile_attempts(diagnostic_path, attempts)
+                        return CompilationResult(
+                            success=True,
+                            pdf_path=output_path,
+                            log_content=log_content,
+                            engine_used=successful_engine,
+                            attempts=attempts,
+                            repaired_tex_path=successful_candidate,
+                            diagnostic_path=diagnostic_path,
+                        )
+                    last_error = "Generated PDF failed integrity check after copy."
+
+                if success:
+                    last_error = "Generated PDF failed integrity check (%PDF/%%EOF)."
+
+                patched_source, fallback_reason, changed = (
+                    self._apply_compile_file_log_fallbacks(
+                        engine_source,
+                        log_content,
+                        build_path,
                     )
-                return True, log_path.read_text(encoding="utf-8", errors="replace"), None
-            except subprocess.TimeoutExpired:
-                message = "Compilation timed out"
-                with log_path.open("a", encoding="utf-8") as log_file:
-                    log_file.write(message + "\n")
-                return False, log_path.read_text(encoding="utf-8", errors="replace"), message
-            except Exception as exc:
-                message = str(exc)
-                with log_path.open("a", encoding="utf-8") as log_file:
-                    log_file.write(message + "\n")
-                return False, log_path.read_text(encoding="utf-8", errors="replace"), message
-
-        engine_used: Optional[str] = None
-        success = False
-        log_content = ""
-        error: Optional[str] = None
-
-        if prefer_latexmk and shutil.which("latexmk"):
-            engine_used = "latexmk"
-            latexmk_cmd = [
-                "latexmk",
-                "-xelatex",
-                "-interaction=nonstopmode",
-                "-file-line-error",
-                f"-output-directory={build_path}",
-            ]
-            if uses_precompiled_bbl:
-                latexmk_cmd.append("-bibtex-")
-            latexmk_cmd.append(tex_file.name)
-            success, log_content, error = run_command(
-                latexmk_cmd
-            )
-        else:
-            if not shutil.which("xelatex"):
-                message = "Neither latexmk nor xelatex was found on PATH."
-                log_path.write_text(message, encoding="utf-8")
-                write_compile_error_summary(log_path, summary_path)
-                return CompilationResult(
-                    success=False,
-                    log_content=message,
-                    error_message=message,
-                    engine_used=None,
                 )
-            engine_used = "xelatex"
-            for _ in range(4):
-                success, log_content, error = run_command(
-                    [
-                        "xelatex",
-                        "-interaction=nonstopmode",
-                        "-file-line-error",
-                        f"-output-directory={build_path}",
-                        tex_file.name,
-                    ]
-                )
-                if not success:
+                if (
+                    not changed
+                    or fallback_reason in applied_repairs
+                    or round_index >= max_repair_rounds
+                ):
                     break
+                engine_source = patched_source
+                applied_repairs.append(fallback_reason)
 
-        built_pdf = build_path / f"{tex_file.stem}.pdf"
-        if success and self._is_pdf_healthy(built_pdf):
-            shutil.copy2(built_pdf, output_path)
-            if self._is_pdf_healthy(output_path):
-                return CompilationResult(
-                    success=True,
-                    pdf_path=output_path,
-                    log_content=log_content,
-                    engine_used=engine_used,
-                )
-            error = "Generated PDF failed integrity check after copy."
-        elif success:
-            error = "Generated PDF failed integrity check (%PDF/%%EOF)."
-
+        self._write_compile_attempts(diagnostic_path, attempts)
         log_content = log_path.read_text(encoding="utf-8", errors="replace")
         write_compile_error_summary(log_path, summary_path)
         return CompilationResult(
             success=False,
-            log_content=log_content,
-            error_message=error or "Compilation failed.",
-            engine_used=engine_used,
+            log_content=log_content or last_log,
+            error_message=last_error or "Compilation failed.",
+            attempts=attempts,
+            diagnostic_path=diagnostic_path,
         )
 
     def compile(
@@ -465,6 +572,28 @@ class LaTeXCompiler:
             # Ignore copy errors (e.g. permission issues), compilation might still work
             pass
 
+    def _prepare_compile_source(
+        self,
+        tex_file: Path,
+        build_path: Path,
+        *,
+        original_source: Optional[str] = None,
+    ) -> Tuple[str, bool]:
+        """Normalize TeX source and align bibliography artifacts without mutating TeX."""
+        if original_source is None:
+            try:
+                original_source = tex_file.read_text(encoding="utf-8")
+            except Exception:
+                return "", False
+
+        normalized = normalize_unicode_engine_source(original_source)
+        rewritten, bbl_aliases = self._rewrite_bibliography_to_precompiled_bbl(
+            normalized,
+            tex_file,
+        )
+        self._copy_bbl_aliases(tex_file, build_path, bbl_aliases)
+        return rewritten, bool(bbl_aliases)
+
     def _prepare_compile_inputs(self, tex_file: Path, build_path: Path) -> bool:
         """Normalize TeX source and align precompiled bibliography artifacts."""
         try:
@@ -472,16 +601,254 @@ class LaTeXCompiler:
         except Exception:
             return False
 
-        normalized = normalize_unicode_engine_source(source)
-        rewritten, bbl_aliases = self._rewrite_bibliography_to_precompiled_bbl(
-            normalized,
+        rewritten, uses_precompiled_bbl = self._prepare_compile_source(
             tex_file,
+            build_path,
+            original_source=source,
         )
         if rewritten != source:
             tex_file.write_text(rewritten, encoding="utf-8")
 
-        self._copy_bbl_aliases(tex_file, build_path, bbl_aliases)
-        return bool(bbl_aliases)
+        return uses_precompiled_bbl
+
+    def _select_compile_file_engines(
+        self,
+        *,
+        engine_policy: str,
+        fallback_engines: Optional[List[str]],
+        latex_source: str,
+        allow_pdflatex_cjk: bool,
+    ) -> List[str]:
+        supported = {"xelatex", "lualatex", "pdflatex"}
+        if engine_policy != "auto":
+            requested = [engine_policy]
+        else:
+            requested = list(fallback_engines or ["xelatex", "lualatex"])
+            if not contains_cjk_text(latex_source) and "pdflatex" not in requested:
+                requested.append("pdflatex")
+
+        engines: List[str] = []
+        for engine in requested:
+            engine = engine.lower()
+            if engine not in supported:
+                continue
+            if engine == "pdflatex" and contains_cjk_text(latex_source):
+                if not allow_pdflatex_cjk:
+                    continue
+            if engine not in engines:
+                engines.append(engine)
+        return engines
+
+    def _build_compile_file_command(
+        self,
+        *,
+        engine: str,
+        candidate: Path,
+        build_path: Path,
+        uses_precompiled_bbl: bool,
+        prefer_latexmk: bool,
+        allow_shell_escape: bool,
+    ) -> List[str]:
+        if prefer_latexmk:
+            engine_flag = "-pdf" if engine == "pdflatex" else f"-{engine}"
+            cmd = [
+                "latexmk",
+                engine_flag,
+                "-interaction=nonstopmode",
+                "-file-line-error",
+                f"-output-directory={build_path}",
+            ]
+            if allow_shell_escape:
+                cmd.append("-shell-escape")
+            if uses_precompiled_bbl:
+                cmd.append("-bibtex-")
+            cmd.append(str(candidate))
+            return cmd
+
+        cmd = [
+            engine,
+            "-interaction=nonstopmode",
+            "-halt-on-error",
+            "-file-line-error",
+            f"-output-directory={build_path}",
+        ]
+        if allow_shell_escape:
+            cmd.append("-shell-escape")
+        cmd.append(str(candidate))
+        return cmd
+
+    def _run_compile_file_command(
+        self,
+        cmd: List[str],
+        *,
+        cwd: Path,
+        log_path: Path,
+    ) -> Tuple[bool, str, Optional[str], Optional[int]]:
+        header = f"$ {' '.join(cmd)}\n"
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(header)
+        try:
+            process = subprocess.run(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                encoding="utf-8",
+                errors="replace",
+                env=self._build_env(),
+            )
+            combined_log = process.stdout + "\n" + process.stderr
+            with log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(combined_log)
+                log_file.write("\n")
+            full_log = log_path.read_text(encoding="utf-8", errors="replace")
+            if process.returncode != 0:
+                return (
+                    False,
+                    full_log,
+                    f"Compilation command exited with code {process.returncode}. "
+                    f"{self._extract_error(combined_log)}",
+                    process.returncode,
+                )
+            return True, full_log, None, process.returncode
+        except subprocess.TimeoutExpired:
+            message = "Compilation timed out"
+            with log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(message + "\n")
+            return (
+                False,
+                log_path.read_text(encoding="utf-8", errors="replace"),
+                message,
+                None,
+            )
+        except Exception as exc:
+            message = str(exc)
+            with log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(message + "\n")
+            return (
+                False,
+                log_path.read_text(encoding="utf-8", errors="replace"),
+                message,
+                None,
+            )
+
+    @staticmethod
+    def _find_built_pdf(
+        build_path: Path,
+        *,
+        candidate_stem: str,
+        tex_stem: str,
+    ) -> Optional[Path]:
+        for pdf_path in (
+            build_path / f"{candidate_stem}.pdf",
+            build_path / f"{tex_stem}.pdf",
+        ):
+            if pdf_path.exists():
+                return pdf_path
+        return None
+
+    @staticmethod
+    def _sync_repaired_tex_on_success(
+        tex_file: Path,
+        original_source: str,
+        repaired_source: str,
+    ) -> None:
+        if repaired_source == original_source:
+            return
+        backup = tex_file.with_name(f"{tex_file.stem}.before_compile{tex_file.suffix}")
+        if not backup.exists():
+            backup.write_text(original_source, encoding="utf-8")
+        tex_file.write_text(repaired_source, encoding="utf-8")
+
+    def _apply_compile_file_log_fallbacks(
+        self,
+        latex_source: str,
+        log_content: str,
+        workspace_dir: Path,
+    ) -> Tuple[str, str, bool]:
+        missing_font = self._extract_missing_font_name(log_content)
+        if missing_font:
+            patched, reason = self._apply_missing_font_fallback(
+                latex_source,
+                missing_font,
+            )
+            if patched != latex_source:
+                return patched, reason, True
+
+        missing_file = self._extract_missing_latex_file(log_content)
+        if missing_file:
+            patched, reason, changed = self._apply_missing_file_fallback(
+                latex_source,
+                missing_file,
+                workspace_dir=workspace_dir,
+            )
+            if changed:
+                return patched, reason, True
+
+        if self._extract_engine_conflict_primitive(log_content):
+            patched, reason, changed = self._apply_pdftex_primitive_fallback(
+                latex_source,
+                workspace_dir=workspace_dir,
+            )
+            if changed:
+                return patched, reason, True
+
+        if self._has_microtype_tracking_error(log_content):
+            patched, reason, changed = self._apply_microtype_tracking_fallback(
+                latex_source,
+                workspace_dir=workspace_dir,
+            )
+            if changed:
+                return patched, reason, True
+
+        return latex_source, "no_fallback", False
+
+    @staticmethod
+    def _classify_compile_log(log_content: str, error: Optional[str] = None) -> str:
+        lowered = f"{log_content or ''}\n{error or ''}".lower()
+        if "shell-escape" in lowered or "write18" in lowered:
+            return "shell_escape"
+        if "fontspec" in lowered:
+            return "fontspec"
+        if re.search(r"file\s+[`'][^`']+[`']\s+not\s+found", lowered):
+            return "missing_file"
+        if "bibtex" in lowered or "biber" in lowered:
+            return "bibliography"
+        if "requires xetex" in lowered or "requires luatex" in lowered:
+            return "engine_mismatch"
+        if "unicode character" in lowered or "cjk" in lowered:
+            return "unicode"
+        if "package" in lowered:
+            return "package"
+        if "undefined control sequence" in lowered or "latex error" in lowered:
+            return "latex"
+        return "unknown"
+
+    @staticmethod
+    def _attempt_to_json(attempt: CompileAttempt) -> Dict[str, Any]:
+        return {
+            "engine": attempt.engine,
+            "command": attempt.command,
+            "tex_path": str(attempt.tex_path) if attempt.tex_path else None,
+            "success": attempt.success,
+            "returncode": attempt.returncode,
+            "error": attempt.error,
+            "category": attempt.category,
+            "repairs": attempt.repairs,
+        }
+
+    def _write_compile_attempts(
+        self,
+        diagnostic_path: Path,
+        attempts: List[CompileAttempt],
+    ) -> None:
+        diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"attempts": [self._attempt_to_json(item) for item in attempts]}
+        diagnostic_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _rewrite_bibliography_to_precompiled_bbl(
         self,

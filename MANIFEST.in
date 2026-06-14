@@ -2,13 +2,13 @@ include LICENSE
 include README.md
 include pyproject.toml
 include config.example.yaml
+include environment.yml
 include .env.example
 recursive-include src/arxiv_translate/defaults *.yaml
 prune fonts
 prune tests
 prune .claude
 exclude AGENTS.md
-exclude uv.lock
 exclude .gitattributes
 exclude .gitignore
 global-exclude .DS_Store

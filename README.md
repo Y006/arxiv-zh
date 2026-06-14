@@ -4,18 +4,23 @@
 
 ## 快速开始
 
+推荐先安装 [Miniforge](https://github.com/conda-forge/miniforge)，使用 conda-forge 的 `mamba` 管理本地运行环境。
+
 ```bash
 git clone https://github.com/Y006/arxiv-zh.git
 cd arxiv-zh
 
-uv sync
+mamba env create -f environment.yml
+conda activate arxiv-zh
+uv pip install -e .
+
 cp .env.example .env
 # 编辑 .env，填入 DEEPSEEK_API_KEY
 cp config.example.yaml config.yaml
 
-uv run arxiv-zh --doctor --config config.yaml
-uv run arxiv-zh 2501.12345 --config config.yaml
-uv run arxiv-zh 2501.12345 --compile-only --config config.yaml
+arxiv-zh --doctor --config config.yaml
+arxiv-zh 2501.12345 --config config.yaml
+arxiv-zh 2501.12345 --compile-only --config config.yaml
 ```
 
 主入口是 `arxiv-zh`。`arx` 和 `arxiv-translate` 仍作为上游兼容入口保留。
@@ -26,7 +31,7 @@ uv run arxiv-zh 2501.12345 --compile-only --config config.yaml
 
 ```bash
 
->>> uv run arxiv-zh --help
+>>> arxiv-zh --help
                                                                      
  Usage: arxiv-zh [OPTIONS] [ARXIV_ID]                                
                                                                      
@@ -76,10 +81,23 @@ export DEEPSEEK_API_KEY=sk-...
 
 完整配置模板见 `config.example.yaml`。默认用户配置目录是 `~/.config/arxiv-translate/`；生产使用建议显式传 `--config config.yaml`。默认模型为 `deepseek-v4-flash`。
 
+环境分工：
+
+- `conda` / `mamba` 管统一运行环境：Python、`uv`、R、R 包 `tinytex`、基础 LaTeX 命令。
+- `uv pip` 管 Python 项目安装：`uv pip install -e .`。
+- R 包 `tinytex` 管官方 LaTeX 编译 wrapper 和自动补包能力。
+- TinyTeX / `tlmgr` 管 TeX 包，例如 `tlmgr install tex-gyre`。
+
 项目保留三枚默认 CJK 字体：`fonts/STSONG.TTF`、`fonts/STXIHEI.TTF`、`fonts/STKAITI.TTF`
 
 如果配置里的 `fonts.auto_detect` 为 `true`，CLI 会优先扫描配置中的 `fonts.dir`，再回退到项目 `fonts/` 和系统字体。项目自带的 `.TTF` 字体可直接通过文件路径注入 LaTeX，不要求系统安装 `fontconfig`。
 
 编译默认按 TinyTeX 优先适配：配置会把常见 TinyTeX bin 目录加入 `PATH`。当 `Rscript` 和 R 包 `tinytex` 可用时，优先调用官方 `tinytex::latexmk(..., install_packages = TRUE)` 自动安装缺失 TeX 包；不可用时才降级到项目内置的 `latexmk + tlmgr` 补包 hook。首次补包可能较慢，`config.example.yaml` 已将单次编译超时放宽到 600 秒、缺包安装超时放宽到 1200 秒、R tinytex 总编译等待放宽到 7200 秒。
 
-`uv run arxiv-zh --doctor --config config.yaml` 会检查 `Rscript`、R 包 `tinytex`、`tlmgr repository`、`tlmgr search --global --file /tgpagella.sty` 和代理环境。项目不会自动换源或永久修改 `tlmgr option repository`；若检查失败，请配置代理或手动切换到可访问的 CTAN 镜像。
+`arxiv-zh --doctor --config config.yaml` 会检查当前 conda 环境、`Rscript`、R 包 `tinytex`、`tlmgr repository`、`tlmgr search --global --file /tgpagella.sty` 和代理环境。项目不会自动安装 TinyTeX、不会自动换源，也不会永久修改 `tlmgr option repository`。若 TinyTeX 本体缺失，请按 doctor 提示运行：
+
+```bash
+Rscript -e 'tinytex::install_tinytex()'
+```
+
+若 `tlmgr` 网络检查失败，请配置代理或手动切换到可访问的 CTAN 镜像。

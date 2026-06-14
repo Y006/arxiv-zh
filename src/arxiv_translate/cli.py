@@ -1,6 +1,7 @@
 import asyncio
 import importlib.metadata as metadata
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -689,6 +690,43 @@ def _doctor_check(name: str, status: str, message: str) -> ArxivZhDoctorCheck:
     return ArxivZhDoctorCheck(name=name, status=status, message=message)
 
 
+RECOMMENDED_CONDA_ENV = "arxiv-zh"
+
+
+def _conda_env_name(env: dict[str, str]) -> Optional[str]:
+    conda_name = env.get("CONDA_DEFAULT_ENV")
+    if conda_name:
+        return Path(conda_name).name
+    conda_prefix = env.get("CONDA_PREFIX")
+    if conda_prefix:
+        return Path(conda_prefix).name
+    return None
+
+
+def _check_conda_environment(env: dict[str, str]) -> ArxivZhDoctorCheck:
+    conda_prefix = env.get("CONDA_PREFIX")
+    if not conda_prefix:
+        return _doctor_check(
+            "conda 环境",
+            "FAIL",
+            "未检测到 CONDA_PREFIX；请先运行 conda activate arxiv-zh",
+        )
+
+    env_name = _conda_env_name(env)
+    if env_name != RECOMMENDED_CONDA_ENV:
+        return _doctor_check(
+            "conda 环境",
+            "FAIL",
+            f"当前环境是 {env_name or 'unknown'}；请切换到 conda activate arxiv-zh",
+        )
+
+    return _doctor_check(
+        "conda 环境",
+        "PASS",
+        f"{env_name} ({conda_prefix})",
+    )
+
+
 def _probe_writable_directory(path: Path) -> tuple[bool, str]:
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -828,6 +866,7 @@ def _collect_arxiv_zh_doctor_checks(config_path: Optional[Path]) -> list[ArxivZh
 
     config_source = str(config_path) if config_path else "默认配置"
     checks.append(_doctor_check("配置文件", "PASS", f"已加载 {config_source}"))
+    checks.append(_check_conda_environment(os.environ))
 
     if config.llm.sdk == "deepseek":
         checks.append(_doctor_check("LLM SDK", "PASS", "deepseek"))
@@ -960,7 +999,9 @@ def _collect_arxiv_zh_doctor_checks(config_path: Optional[Path]) -> list[ArxivZh
                     _doctor_check(
                         "TinyTeX 路径",
                         "WARN",
-                        "未找到常见 TinyTeX 路径，将依赖系统 PATH",
+                        "未找到常见 TinyTeX 路径，将依赖系统 PATH；"
+                        "如未初始化 TinyTeX，请运行 "
+                        "Rscript -e 'tinytex::install_tinytex()'",
                     )
                 )
 
@@ -1047,7 +1088,10 @@ def _collect_arxiv_zh_doctor_checks(config_path: Optional[Path]) -> list[ArxivZh
                 _doctor_check(
                     "tlmgr",
                     "PASS" if tlmgr else "WARN",
-                    tlmgr or "未找到；TinyTeX 缺包自动安装将不可用",
+                    tlmgr
+                    or "未找到；TinyTeX 缺包自动安装将不可用。"
+                    "如未初始化 TinyTeX，请运行 "
+                    "Rscript -e 'tinytex::install_tinytex()'",
                 )
             )
             if tlmgr:

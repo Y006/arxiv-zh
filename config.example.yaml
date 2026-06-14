@@ -44,7 +44,7 @@ compilation:
   max_repair_rounds: 3
   chinese_package: auto
   use_tinytex: true
-  tinytex_driver: auto
+  tinytex_driver: r_tinytex
   tinytex_paths:
     - ~/Library/TinyTeX/bin/universal-darwin
     - ~/.TinyTeX/bin/*

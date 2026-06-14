@@ -14,6 +14,12 @@ def _write_config(path: Path, content: str) -> Path:
     return path
 
 
+def _set_conda_env(monkeypatch, tmp_path: Path, name: str = "arxiv-zh") -> None:
+    prefix = tmp_path / "miniforge3" / "envs" / name
+    monkeypatch.setenv("CONDA_PREFIX", str(prefix))
+    monkeypatch.setenv("CONDA_DEFAULT_ENV", name)
+
+
 def test_prepare_arxiv_zh_output_dirs_creates_expected_layout(tmp_path: Path):
     from arxiv_translate.cli import _prepare_arxiv_zh_output_dirs
 
@@ -432,6 +438,7 @@ def test_arxiv_zh_pipeline_skips_download_and_translation_when_metadata_complete
 def test_arxiv_zh_doctor_collects_success(monkeypatch, tmp_path: Path):
     import arxiv_translate.cli as cli_module
 
+    _set_conda_env(monkeypatch, tmp_path)
     fonts_dir = tmp_path / "fonts"
     fonts_dir.mkdir()
     tinytex_bin = tmp_path / "TinyTeX" / "bin"
@@ -517,6 +524,7 @@ def test_arxiv_zh_doctor_collects_success(monkeypatch, tmp_path: Path):
         check.name == "DeepSeek 连通性" and check.status == "PASS"
         for check in checks
     )
+    assert any(check.name == "conda 环境" and check.status == "PASS" for check in checks)
     assert any(check.name == "LaTeX 引擎" and check.status == "PASS" for check in checks)
     assert any(check.name == "Rscript" and check.status == "PASS" for check in checks)
     assert any(check.name == "R tinytex" and check.status == "PASS" for check in checks)
@@ -541,6 +549,7 @@ def test_arxiv_zh_doctor_collects_success(monkeypatch, tmp_path: Path):
 def test_arxiv_zh_doctor_reports_missing_key_without_ping(monkeypatch, tmp_path: Path):
     import arxiv_translate.cli as cli_module
 
+    _set_conda_env(monkeypatch, tmp_path)
     config_path = _write_config(
         tmp_path / "config.yaml",
         """
@@ -578,12 +587,72 @@ def test_arxiv_zh_doctor_reports_missing_key_without_ping(monkeypatch, tmp_path:
     )
 
 
+def test_arxiv_zh_doctor_fails_without_conda_env(monkeypatch, tmp_path: Path):
+    import arxiv_translate.cli as cli_module
+
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        paths:
+          output_dir: ./translated-output
+        fonts:
+          auto_detect: false
+        compilation:
+          enabled: false
+        """,
+    )
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    monkeypatch.delenv("CONDA_DEFAULT_ENV", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(cli_module, "_arxiv_zh_dotenv_paths", lambda: [])
+    monkeypatch.setattr(cli_module, "_probe_arxiv_reachable", lambda: (True, "HTTP 200"))
+
+    checks = cli_module._collect_arxiv_zh_doctor_checks(config_path)
+
+    assert any(
+        check.name == "conda 环境"
+        and check.status == "FAIL"
+        and "conda activate arxiv-zh" in check.message
+        for check in checks
+    )
+
+
+def test_arxiv_zh_doctor_fails_for_wrong_conda_env(monkeypatch, tmp_path: Path):
+    import arxiv_translate.cli as cli_module
+
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        paths:
+          output_dir: ./translated-output
+        fonts:
+          auto_detect: false
+        compilation:
+          enabled: false
+        """,
+    )
+    _set_conda_env(monkeypatch, tmp_path, name="base")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(cli_module, "_arxiv_zh_dotenv_paths", lambda: [])
+    monkeypatch.setattr(cli_module, "_probe_arxiv_reachable", lambda: (True, "HTTP 200"))
+
+    checks = cli_module._collect_arxiv_zh_doctor_checks(config_path)
+
+    assert any(
+        check.name == "conda 环境"
+        and check.status == "FAIL"
+        and "当前环境是 base" in check.message
+        for check in checks
+    )
+
+
 def test_arxiv_zh_doctor_reports_tinytex_package_network_failure(
     monkeypatch,
     tmp_path: Path,
 ):
     import arxiv_translate.cli as cli_module
 
+    _set_conda_env(monkeypatch, tmp_path)
     config_path = _write_config(
         tmp_path / "config.yaml",
         """
@@ -669,6 +738,7 @@ def test_arxiv_zh_doctor_accepts_local_fonts_without_fontconfig(
 ):
     import arxiv_translate.cli as cli_module
 
+    _set_conda_env(monkeypatch, tmp_path)
     fonts_dir = tmp_path / "fonts"
     fonts_dir.mkdir()
     for filename in ("STSONG.TTF", "STXIHEI.TTF", "STKAITI.TTF"):

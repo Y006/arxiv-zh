@@ -1,0 +1,12 @@
+name: arxiv-zh
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - uv
+  - pip
+  - r-base
+  - r-tinytex
+  - latexmk
+  - perl

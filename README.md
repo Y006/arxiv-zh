@@ -92,7 +92,7 @@ export DEEPSEEK_API_KEY=sk-...
 
 如果配置里的 `fonts.auto_detect` 为 `true`，CLI 会优先扫描配置中的 `fonts.dir`，再回退到项目 `fonts/` 和系统字体。项目自带的 `.TTF` 字体可直接通过文件路径注入 LaTeX，不要求系统安装 `fontconfig`。
 
-编译默认按 TinyTeX 优先适配：配置会把常见 TinyTeX bin 目录加入 `PATH`。当 `Rscript` 和 R 包 `tinytex` 可用时，优先调用官方 `tinytex::latexmk(..., install_packages = TRUE)` 自动安装缺失 TeX 包；不可用时才降级到项目内置的 `latexmk + tlmgr` 补包 hook。首次补包可能较慢，`config.example.yaml` 已将单次编译超时放宽到 600 秒、缺包安装超时放宽到 1200 秒、R tinytex 总编译等待放宽到 7200 秒。
+编译默认按 TinyTeX 优先适配：配置会把常见 TinyTeX bin 目录加入 `PATH`。当 `Rscript` 和 R 包 `tinytex` 可用时，优先调用官方 `tinytex::latexmk(..., install_packages = TRUE)` 自动安装缺失 TeX 包；如果官方 wrapper 不可用，`auto` 只能降级为普通 `latexmk` 编译，不会再由项目自写 `tlmgr` 补包。首次补包可能较慢，`config.example.yaml` 已将单次编译超时放宽到 600 秒、R tinytex 总编译等待放宽到 7200 秒。
 
 `arxiv-zh --doctor --config config.yaml` 会检查当前 conda 环境、`Rscript`、R 包 `tinytex`、`tlmgr repository`、`tlmgr search --global --file /tgpagella.sty` 和代理环境。项目不会自动安装 TinyTeX、不会自动换源，也不会永久修改 `tlmgr option repository`。若 TinyTeX 本体缺失，请按 doctor 提示运行：
 

@@ -155,9 +155,7 @@ class LaTeXCompiler:
         tinytex_driver: str = "auto",
         tinytex_paths: Optional[List[str]] = None,
         install_missing_packages: bool = True,
-        install_timeout: int = 1200,
         total_timeout: int = 7200,
-        max_package_install_rounds: int = 8,
     ):
         self.timeout = timeout
         # Priority: xelatex (best CJK), lualatex (good CJK), pdflatex (fallback)
@@ -167,9 +165,7 @@ class LaTeXCompiler:
         self.tinytex_driver = tinytex_driver
         self.tinytex_paths = list(tinytex_paths or self.DEFAULT_TINYTEX_PATHS)
         self.install_missing_packages = install_missing_packages
-        self.install_timeout = install_timeout
         self.total_timeout = total_timeout
-        self.max_package_install_rounds = max_package_install_rounds
 
     def inject_chinese_support(self, latex_source: str) -> str:
         """Wrapper around the injection logic."""
@@ -279,7 +275,9 @@ class LaTeXCompiler:
         candidate: Path,
         build_path: Path,
         allow_shell_escape: bool,
+        install_packages: bool,
     ) -> List[str]:
+        install_packages_value = "TRUE" if install_packages else "FALSE"
         expression = (
             "args <- commandArgs(trailingOnly = TRUE); "
             "file <- args[[1]]; "
@@ -290,7 +288,8 @@ class LaTeXCompiler:
             "paste0('-output-directory=', output_dir)); "
             "if (shell_escape) engine_args <- c(engine_args, '-shell-escape'); "
             "tinytex::latexmk(file, engine = engine, engine_args = engine_args, "
-            "emulation = TRUE, clean = FALSE, install_packages = TRUE)"
+            "emulation = TRUE, clean = FALSE, "
+            f"install_packages = {install_packages_value})"
         )
         return [
             rscript,
@@ -412,6 +411,7 @@ class LaTeXCompiler:
                 candidate=candidate,
                 build_path=build_path,
                 allow_shell_escape=allow_shell_escape,
+                install_packages=self.install_missing_packages,
             )
             success, log_content, error, returncode = self._run_r_tinytex_command(
                 cmd,
@@ -431,7 +431,11 @@ class LaTeXCompiler:
                 category="success"
                 if success
                 else self._classify_compile_log(log_content, error),
-                repairs=["r_tinytex_auto_install"],
+                repairs=[
+                    "r_tinytex_auto_install"
+                    if self.install_missing_packages
+                    else "r_tinytex"
+                ],
             )
             attempts.append(attempt)
 
@@ -558,7 +562,12 @@ class LaTeXCompiler:
         if compile_driver == "r_tinytex":
             self._append_compile_log(
                 log_path,
-                "Using R tinytex driver for automatic package installation.",
+                "Using R tinytex driver"
+                + (
+                    " for automatic package installation."
+                    if self.install_missing_packages
+                    else " without automatic package installation."
+                ),
             )
             return self._compile_file_with_r_tinytex(
                 tex_file=tex_file,
@@ -621,12 +630,9 @@ class LaTeXCompiler:
                 font_dir=self.fonts_dir,
             )
             applied_repairs: List[str] = []
-            package_install_count = 0
             source_repair_count = 0
 
-            for round_index in range(
-                max_repair_rounds + self.max_package_install_rounds + 1
-            ):
+            for round_index in range(max_repair_rounds + 1):
                 candidate = build_path / (
                     f"{tex_file.stem}.{engine}.round{round_index + 1}.tex"
                 )
@@ -696,23 +702,6 @@ class LaTeXCompiler:
 
                 if success:
                     last_error = "Generated PDF failed integrity check (%PDF/%%EOF)."
-
-                installed_package = None
-                if self.install_missing_packages:
-                    installed_package = self._install_missing_package_from_log(
-                        log_content,
-                        log_path=log_path,
-                        env=env,
-                    )
-                if installed_package:
-                    install_reason = f"tlmgr_install:{installed_package}"
-                    if (
-                        install_reason not in applied_repairs
-                        and package_install_count < self.max_package_install_rounds
-                    ):
-                        applied_repairs.append(install_reason)
-                        package_install_count += 1
-                        continue
 
                 patched_source, fallback_reason, changed = (
                     self._apply_compile_file_log_fallbacks(
@@ -1118,115 +1107,6 @@ class LaTeXCompiler:
                 message,
                 None,
             )
-
-    def _install_missing_package_from_log(
-        self,
-        log_content: str,
-        *,
-        log_path: Path,
-        env: Dict[str, str],
-    ) -> Optional[str]:
-        missing_file = self._extract_missing_latex_file(log_content)
-        if not missing_file:
-            return None
-
-        tlmgr = self._which("tlmgr", env)
-        if not tlmgr:
-            self._append_compile_log(
-                log_path,
-                f"TinyTeX package install skipped: tlmgr not found for {missing_file}.",
-            )
-            return None
-
-        package = self._find_tlmgr_package_for_file(missing_file, tlmgr=tlmgr, env=env)
-        if not package:
-            self._append_compile_log(
-                log_path,
-                f"TinyTeX package install skipped: no package found for {missing_file}.",
-            )
-            return None
-
-        if self._install_tlmgr_package(package, tlmgr=tlmgr, env=env, log_path=log_path):
-            return package
-        return None
-
-    def _find_tlmgr_package_for_file(
-        self,
-        missing_file: str,
-        *,
-        tlmgr: str,
-        env: Dict[str, str],
-    ) -> Optional[str]:
-        query = missing_file.strip()
-        if not query:
-            return None
-        if not query.startswith("/"):
-            query = f"/{query}"
-
-        try:
-            process = subprocess.run(
-                [tlmgr, "search", "--global", "--file", query],
-                capture_output=True,
-                text=True,
-                timeout=self.install_timeout,
-                encoding="utf-8",
-                errors="replace",
-                env=env,
-            )
-        except Exception:
-            return None
-
-        if process.returncode != 0:
-            return None
-
-        for line in process.stdout.splitlines():
-            stripped = line.strip()
-            if not stripped or ":" not in stripped:
-                continue
-            package, _sep, _rest = stripped.partition(":")
-            package = package.strip()
-            if package:
-                return package
-        return None
-
-    def _install_tlmgr_package(
-        self,
-        package: str,
-        *,
-        tlmgr: str,
-        env: Dict[str, str],
-        log_path: Path,
-    ) -> bool:
-        self._append_compile_log(
-            log_path,
-            f"TinyTeX installing missing package with tlmgr: {package}",
-        )
-        try:
-            process = subprocess.run(
-                [tlmgr, "install", package],
-                capture_output=True,
-                text=True,
-                timeout=self.install_timeout,
-                encoding="utf-8",
-                errors="replace",
-                env=env,
-            )
-        except subprocess.TimeoutExpired:
-            self._append_compile_log(
-                log_path,
-                f"TinyTeX package install timed out after {self.install_timeout}s: {package}",
-            )
-            return False
-        except Exception as exc:
-            self._append_compile_log(
-                log_path,
-                f"TinyTeX package install failed for {package}: {exc}",
-            )
-            return False
-
-        install_log = (process.stdout or "") + "\n" + (process.stderr or "")
-        self._append_compile_log(log_path, install_log.strip())
-        return process.returncode == 0
 
     @staticmethod
     def _append_compile_log(log_path: Path, message: str) -> None:

@@ -186,7 +186,7 @@ def test_tinytex_paths_are_prepended_to_path(monkeypatch, tmp_path: Path):
     assert env["PATH"].split(os.pathsep)[0] == str(tinytex_bin.resolve())
 
 
-def test_compile_file_installs_missing_tinytex_package(
+def test_compile_file_latexmk_does_not_run_python_tlmgr_auto_install(
     monkeypatch,
     tmp_path: Path,
 ):
@@ -198,7 +198,6 @@ def test_compile_file_installs_missing_tinytex_package(
         "\\begin{document}x\\end{document}\n",
         encoding="utf-8",
     )
-    installed = {"enumitem": False}
     commands = []
 
     def fake_which(name, path=None):
@@ -217,21 +216,13 @@ def test_compile_file_installs_missing_tinytex_package(
                 stderr="",
             )
         if cmd[0] == "/tinytex/bin/tlmgr" and cmd[1] == "install":
-            installed["enumitem"] = True
             return SimpleNamespace(returncode=0, stdout="installed", stderr="")
         if cmd[0] == "latexmk":
-            tex_arg = Path(cmd[-1])
-            if not installed["enumitem"]:
-                return SimpleNamespace(
-                    returncode=1,
-                    stdout="! LaTeX Error: File `enumitem.sty' not found.\n",
-                    stderr="",
-                )
-            build_dir.mkdir(parents=True, exist_ok=True)
-            (build_dir / f"{tex_arg.stem}.pdf").write_bytes(
-                b"%PDF-1.5\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+            return SimpleNamespace(
+                returncode=1,
+                stdout="! LaTeX Error: File `enumitem.sty' not found.\n",
+                stderr="",
             )
-            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
         raise AssertionError(f"unexpected command: {cmd}")
 
     monkeypatch.setattr(
@@ -248,12 +239,13 @@ def test_compile_file_installs_missing_tinytex_package(
         max_repair_rounds=0,
     )
 
-    assert result.success is True
-    assert [cmd[:2] for cmd in commands if cmd[0] == "/tinytex/bin/tlmgr"] == [
-        ["/tinytex/bin/tlmgr", "search"],
-        ["/tinytex/bin/tlmgr", "install"],
-    ]
-    assert any("tlmgr_install:enumitem" in attempt.repairs for attempt in result.attempts)
+    assert result.success is False
+    assert not [cmd for cmd in commands if cmd[0] == "/tinytex/bin/tlmgr"]
+    assert not any(
+        repair.startswith("tlmgr_install:")
+        for attempt in result.attempts
+        for repair in attempt.repairs
+    )
 
 
 def test_compile_file_auto_uses_r_tinytex_when_available(monkeypatch, tmp_path: Path):
@@ -304,6 +296,59 @@ def test_compile_file_auto_uses_r_tinytex_when_available(monkeypatch, tmp_path: 
     assert result.pdf_path == tmp_path / "pdf" / "main_zh.pdf"
     assert any("tinytex::latexmk" in cmd[3] for cmd, _kwargs in commands)
     assert not [cmd for cmd, _kwargs in commands if cmd[0] == "latexmk"]
+
+
+def test_compile_file_r_tinytex_honors_disabled_package_install(
+    monkeypatch,
+    tmp_path: Path,
+):
+    build_dir = tmp_path / "build"
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\\begin{document}x\\end{document}",
+        encoding="utf-8",
+    )
+    commands = []
+
+    def fake_which(name, path=None):
+        _ = path
+        if name == "Rscript":
+            return "/usr/bin/Rscript"
+        return None
+
+    def fake_run(cmd, **kwargs):
+        commands.append((cmd, kwargs))
+        if cmd[0] == "/usr/bin/Rscript" and "requireNamespace" in cmd[3]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[0] == "/usr/bin/Rscript":
+            candidate = Path(cmd[4])
+            output_dir = Path(cmd[6])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / f"{candidate.stem}.pdf").write_bytes(
+                b"%PDF-1.5\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+            )
+            return SimpleNamespace(returncode=0, stdout="compiled", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler(install_missing_packages=False).compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+    )
+
+    compile_commands = [
+        cmd for cmd, _kwargs in commands if cmd[0] == "/usr/bin/Rscript" and cmd[4:]
+    ]
+    assert result.success is True
+    assert compile_commands
+    assert "install_packages = FALSE" in compile_commands[0][3]
 
 
 def test_compile_file_auto_falls_back_to_latexmk_when_r_tinytex_missing(

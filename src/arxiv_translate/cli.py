@@ -680,9 +680,7 @@ def _arxiv_zh_compiler_from_config(config: Config) -> LaTeXCompiler:
         tinytex_driver=config.compilation.tinytex_driver,
         tinytex_paths=config.compilation.tinytex_paths,
         install_missing_packages=config.compilation.install_missing_packages,
-        install_timeout=config.compilation.install_timeout,
         total_timeout=config.compilation.total_timeout,
-        max_package_install_rounds=config.compilation.max_package_install_rounds,
     )
 
 
@@ -1012,7 +1010,8 @@ def _collect_arxiv_zh_doctor_checks(config_path: Optional[Path]) -> list[ArxivZh
                     "Rscript",
                     "PASS" if rscript else ("FAIL" if r_required else "WARN"),
                     rscript
-                    or "未找到；auto 会降级到 latexmk，r_tinytex 强制模式不可用",
+                    or "未找到；auto 只能降级到普通 latexmk 编译，"
+                    "不会自动安装缺失 TeX 包；r_tinytex 强制模式不可用",
                 )
             )
             r_tinytex_ok, r_tinytex_detail = compiler._r_tinytex_available(env)
@@ -1021,19 +1020,27 @@ def _collect_arxiv_zh_doctor_checks(config_path: Optional[Path]) -> list[ArxivZh
                     _doctor_check(
                         "R tinytex",
                         "PASS",
-                        "官方 tinytex wrapper 可用，支持自动安装缺失包",
+                        "官方 tinytex wrapper 可用"
+                        + (
+                            "，支持自动安装缺失包"
+                            if config.compilation.install_missing_packages
+                            else "，当前配置关闭自动补包"
+                        ),
                     )
                 )
                 checks.append(
                     _doctor_check(
                         "TinyTeX 自动补包",
-                        "PASS",
-                        "将优先使用 tinytex::latexmk(..., install_packages = TRUE)",
+                        "PASS" if config.compilation.install_missing_packages else "WARN",
+                        "将优先使用 tinytex::latexmk(..., install_packages = TRUE)"
+                        if config.compilation.install_missing_packages
+                        else "当前配置会调用 tinytex::latexmk(..., install_packages = FALSE)",
                     )
                 )
             else:
                 fallback_message = (
-                    f"{r_tinytex_detail}；auto 会降级到 latexmk + tlmgr hook。"
+                    f"{r_tinytex_detail}；auto 只能降级到普通 latexmk 编译，"
+                    "不会自动安装缺失 TeX 包。"
                 )
                 checks.append(
                     _doctor_check(
@@ -1046,7 +1053,7 @@ def _collect_arxiv_zh_doctor_checks(config_path: Optional[Path]) -> list[ArxivZh
                     _doctor_check(
                         "TinyTeX 自动补包",
                         "FAIL" if r_required else "WARN",
-                        "未使用官方 R tinytex wrapper；"
+                        "未使用官方 R tinytex wrapper；不会自动安装缺失 TeX 包，"
                         "请安装 R 包 tinytex 以启用推荐补包路径",
                     )
                 )
@@ -1768,11 +1775,7 @@ def translate(
                         install_missing_packages=(
                             config.compilation.install_missing_packages
                         ),
-                        install_timeout=config.compilation.install_timeout,
                         total_timeout=config.compilation.total_timeout,
-                        max_package_install_rounds=(
-                            config.compilation.max_package_install_rounds
-                        ),
                     )
                     compile_error: Optional[str] = None
                     try:

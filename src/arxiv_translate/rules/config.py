@@ -82,6 +82,7 @@ class CompilationConfig(StrictConfigModel):
         ]
     )
     install_missing_packages: bool = True
+    # Legacy no-op fields kept so older config.yaml files continue to load.
     install_timeout: int = 1200
     total_timeout: int = 7200
     max_package_install_rounds: int = 8

@@ -52,9 +52,7 @@ compilation:
     - /Library/TinyTeX/bin/universal-darwin
     - /Library/TeX/texbin
   install_missing_packages: true
-  install_timeout: 1200
   total_timeout: 7200
-  max_package_install_rounds: 8
 
 parser:
   extra_protected_environments: []

@@ -298,6 +298,250 @@ def test_compile_file_auto_uses_r_tinytex_when_available(monkeypatch, tmp_path: 
     assert not [cmd for cmd, _kwargs in commands if cmd[0] == "latexmk"]
 
 
+def test_compile_file_r_tinytex_uses_engine_log_for_error_and_attempt_metadata(
+    monkeypatch,
+    tmp_path: Path,
+):
+    build_dir = tmp_path / "build"
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\\begin{document}x\\end{document}",
+        encoding="utf-8",
+    )
+
+    def fake_which(name, path=None):
+        _ = path
+        if name == "Rscript":
+            return "/usr/bin/Rscript"
+        return None
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "/usr/bin/Rscript" and "requireNamespace" in cmd[3]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[0] == "/usr/bin/Rscript":
+            candidate = Path(cmd[4])
+            engine_log = Path(cmd[6]) / f"{candidate.stem}.log"
+            engine_log.parent.mkdir(parents=True, exist_ok=True)
+            engine_log.write_text(
+                "! LaTeX Error: File `bbding.sty' not found.\n"
+                "l.17 \\usepackage{bbding}\n",
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler().compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+        max_repair_rounds=0,
+    )
+
+    attempts = json.loads(
+        (tmp_path / "logs" / "compile_attempts.json").read_text(encoding="utf-8")
+    )["attempts"]
+    compile_log = (tmp_path / "logs" / "compile.log").read_text(encoding="utf-8")
+    assert result.success is False
+    assert result.error_message is not None
+    assert "bbding.sty" in result.error_message
+    assert "Unknown error" not in result.error_message
+    assert "bbding.sty" in compile_log
+    assert attempts[0]["missing_file"] == "bbding.sty"
+    assert attempts[0]["engine_log_path"].endswith(".log")
+    assert "bbding.sty" in attempts[0]["first_error"]
+
+
+def test_compile_file_r_tinytex_applies_log_fallback_and_retries(
+    monkeypatch,
+    tmp_path: Path,
+):
+    build_dir = tmp_path / "build"
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\n"
+        "\\usepackage{axessibility}\n"
+        "\\begin{document}x\\end{document}\n",
+        encoding="utf-8",
+    )
+    compile_candidates = []
+
+    def fake_which(name, path=None):
+        _ = path
+        if name == "Rscript":
+            return "/usr/bin/Rscript"
+        return None
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "/usr/bin/Rscript" and "requireNamespace" in cmd[3]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[0] == "/usr/bin/Rscript":
+            candidate = Path(cmd[4])
+            output_dir = Path(cmd[6])
+            compile_candidates.append(candidate)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            engine_log = output_dir / f"{candidate.stem}.log"
+            if len(compile_candidates) == 1:
+                assert "\\usepackage{axessibility}" in candidate.read_text(
+                    encoding="utf-8"
+                )
+                engine_log.write_text(
+                    "/tinytex/texmf-dist/tex/latex/axessibility/axessibility.sty:349: "
+                    "Undefined control sequence.\n"
+                    "l.349 \\pdfcompresslevel\n",
+                    encoding="utf-8",
+                )
+                return SimpleNamespace(returncode=1, stdout="", stderr="")
+            assert "\\usepackage{axessibility}" not in candidate.read_text(
+                encoding="utf-8"
+            )
+            (output_dir / f"{candidate.stem}.pdf").write_bytes(
+                b"%PDF-1.5\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+            )
+            engine_log.write_text("ok", encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout="compiled", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler().compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+        max_repair_rounds=1,
+    )
+
+    assert result.success is True
+    assert len(compile_candidates) == 2
+    assert any(
+        "fallback_remove_axessibility" in attempt.repairs
+        for attempt in result.attempts
+    )
+
+
+def test_compile_file_r_tinytex_recovers_pdf_from_nonzero_wrapper_exit(
+    monkeypatch,
+    tmp_path: Path,
+):
+    build_dir = tmp_path / "build"
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\\begin{document}x\\end{document}",
+        encoding="utf-8",
+    )
+
+    def fake_which(name, path=None):
+        _ = path
+        if name == "Rscript":
+            return "/usr/bin/Rscript"
+        return None
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "/usr/bin/Rscript" and "requireNamespace" in cmd[3]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[0] == "/usr/bin/Rscript":
+            candidate = Path(cmd[4])
+            output_dir = Path(cmd[6])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / f"{candidate.stem}.pdf").write_bytes(
+                b"%PDF-1.5\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+            )
+            (output_dir / f"{candidate.stem}.log").write_text(
+                "Output written on main.pdf.\n", encoding="utf-8"
+            )
+            return SimpleNamespace(
+                returncode=1,
+                stdout="Latexmk: Errors, so I did not complete making targets\n",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler().compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+    )
+
+    attempts = json.loads(
+        (tmp_path / "logs" / "compile_attempts.json").read_text(encoding="utf-8")
+    )["attempts"]
+    assert result.success is True
+    assert result.pdf_path == tmp_path / "pdf" / "main_zh.pdf"
+    assert result.warning_message is not None
+    assert attempts[0]["category"] == "success_with_wrapper_warning"
+
+
+def test_compile_file_r_tinytex_sets_texinputs(monkeypatch, tmp_path: Path):
+    source_dir = tmp_path / "source"
+    translated_dir = tmp_path / "translated"
+    build_dir = tmp_path / "build"
+    source_dir.mkdir()
+    translated_dir.mkdir()
+    tex_file = translated_dir / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\\begin{document}x\\end{document}",
+        encoding="utf-8",
+    )
+    captured_env = {}
+
+    def fake_which(name, path=None):
+        _ = path
+        if name == "Rscript":
+            return "/usr/bin/Rscript"
+        return None
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "/usr/bin/Rscript" and "requireNamespace" in cmd[3]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[0] == "/usr/bin/Rscript":
+            captured_env.update(kwargs["env"])
+            candidate = Path(cmd[4])
+            output_dir = Path(cmd[6])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / f"{candidate.stem}.pdf").write_bytes(
+                b"%PDF-1.5\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+            )
+            return SimpleNamespace(returncode=0, stdout="compiled", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler().compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+    )
+
+    assert result.success is True
+    texinputs = captured_env["TEXINPUTS"]
+    assert str(build_dir) in texinputs
+    assert str(translated_dir) in texinputs
+    assert str(source_dir) in texinputs
+
+
 def test_compile_file_r_tinytex_honors_disabled_package_install(
     monkeypatch,
     tmp_path: Path,

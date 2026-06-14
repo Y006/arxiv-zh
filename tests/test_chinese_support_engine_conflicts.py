@@ -98,6 +98,7 @@ def test_strip_engine_conflict_primitives_removes_multiple_primitives():
         "\\pdfminorversion=7\n"
         "\\pdfcompresslevel=9\n"
         "\\pdfobjcompresslevel=3\n"
+        "\\pdfmapline{+NVIDIASans_Rg < NVIDIA-Sans-Font-TTF/NVIDIASans_Rg.ttf}\n"
         "\\documentclass{article}\n"
     )
     patched = _strip_engine_conflict_primitives(source)
@@ -105,6 +106,7 @@ def test_strip_engine_conflict_primitives_removes_multiple_primitives():
     assert "\\pdfminorversion=7" not in patched
     assert "\\pdfcompresslevel=9" not in patched
     assert "\\pdfobjcompresslevel=3" not in patched
+    assert "\\pdfmapline" not in patched
     assert "\\documentclass{article}" in patched
 
 
@@ -217,6 +219,39 @@ def test_inject_chinese_support_for_engine_uses_luatexja_for_lualatex():
     assert "\\setmainjfont{FandolSong}" in patched
     assert "\\usepackage{xeCJK}" not in patched
     assert "\\setCJKmainfont" not in patched
+
+
+def test_inject_chinese_support_adds_luatexja_fonts_when_package_exists(tmp_path):
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    for filename in ("STSONG.TTF", "STXIHEI.TTF", "STKAITI.TTF"):
+        (fonts_dir / filename).write_bytes(b"not a real font")
+
+    source = (
+        "\\documentclass{article}\n"
+        "\\usepackage{luatexja-fontspec}\n"
+        "\\begin{document}\n"
+        "中文\n"
+        "\\end{document}\n"
+    )
+
+    patched = inject_chinese_support_for_engine(
+        source,
+        engine="lualatex",
+        font_config={
+            "dir": str(fonts_dir),
+            "main": "STSONG.TTF",
+            "sans": "STXIHEI.TTF",
+            "mono": "STKAITI.TTF",
+            "auto_detect": False,
+        },
+    )
+
+    font_path_option = f"Path={{{fonts_dir.as_posix()}/}}"
+    assert patched.count("\\usepackage{luatexja-fontspec}") == 1
+    assert f"\\setmainjfont[{font_path_option}]{{STSONG.TTF}}" in patched
+    assert f"\\setsansjfont[{font_path_option}]{{STXIHEI.TTF}}" in patched
+    assert f"\\setmonojfont[{font_path_option}]{{STKAITI.TTF}}" in patched
 
 
 def test_inject_chinese_support_uses_font_file_paths(tmp_path):

@@ -632,6 +632,7 @@ def _compile_arxiv_zh_translated_tex(
         pdf_path=str(pdf_path) if pdf_path else None,
         engine_used=result.engine_used,
         attempts_path=str(result.diagnostic_path) if result.diagnostic_path else None,
+        warning=getattr(result, "warning_message", None),
         repaired_tex_path=(
             str(result.repaired_tex_path) if result.repaired_tex_path else None
         ),
@@ -839,6 +840,48 @@ def _probe_tlmgr_tgpagella_search(
         "可能需要配置代理，或手动将 tlmgr repository 换到可访问的 CTAN 镜像。"
     )
     return False, f"{detail}; {hint}"
+
+
+COMMON_TINYTEX_PROBE_FILES = (
+    "bbding.sty",
+    "ifsym.sty",
+    "algpseudocodex.sty",
+    "bbm.sty",
+    "newtxmath.sty",
+    "HaranoAjiMincho-Regular.otf",
+)
+
+
+def _probe_common_tinytex_files(
+    kpsewhich: str,
+    *,
+    env: dict[str, str],
+    timeout: int = 15,
+) -> tuple[bool, str]:
+    missing: list[str] = []
+    found: list[str] = []
+    details: list[str] = []
+    for filename in COMMON_TINYTEX_PROBE_FILES:
+        ok, detail = _run_doctor_command(
+            [kpsewhich, filename],
+            env=env,
+            timeout=timeout,
+        )
+        if ok:
+            found.append(filename)
+        else:
+            missing.append(filename)
+            details.append(f"{filename}: {detail}")
+
+    if missing:
+        return (
+            False,
+            "缺少常见批量编译文件："
+            + ", ".join(missing)
+            + "。这不一定阻止所有论文编译，但相关论文可能需要 TinyTeX/tlmgr 补包。"
+            + ((" 详情：" + " | ".join(details)) if details else ""),
+        )
+    return True, "常见批量编译文件可见：" + ", ".join(found)
 
 
 async def _ping_arxiv_zh_llm(config: Config, api_key: str) -> str:
@@ -1088,6 +1131,29 @@ def _collect_arxiv_zh_doctor_checks(config_path: Optional[Path]) -> list[ArxivZh
                 else "未找到可用的 xelatex/lualatex",
             )
         )
+
+        kpsewhich = compiler._which("kpsewhich", env)
+        if kpsewhich:
+            common_ok, common_detail = _probe_common_tinytex_files(
+                kpsewhich,
+                env=env,
+            )
+            checks.append(
+                _doctor_check(
+                    "TinyTeX 常见文件",
+                    "PASS" if common_ok else "WARN",
+                    common_detail,
+                )
+            )
+        elif config.compilation.use_tinytex:
+            checks.append(
+                _doctor_check(
+                    "TinyTeX 常见文件",
+                    "WARN",
+                    "未找到 kpsewhich，无法提前检查 bbding/ifsym/"
+                    "algpseudocodex/newtx/HaranoAji 等常见编译风险。",
+                )
+            )
 
         if config.compilation.install_missing_packages:
             tlmgr = compiler._which("tlmgr", env)

@@ -732,6 +732,96 @@ def test_arxiv_zh_doctor_reports_tinytex_package_network_failure(
     )
 
 
+def test_arxiv_zh_doctor_reports_common_tinytex_file_risks(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import arxiv_translate.cli as cli_module
+
+    _set_conda_env(monkeypatch, tmp_path)
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        llm:
+          key: sk-test
+        paths:
+          output_dir: ./translated-output
+        fonts:
+          auto_detect: false
+          main: STSong
+          sans: STXihei
+          mono: STKaiti
+        compilation:
+          enabled: true
+        """,
+    )
+
+    class DummyProvider:
+        async def ping(self):
+            return "hi"
+
+    class DummyCompiler:
+        def __init__(self, **_kwargs):
+            pass
+
+        def _build_env(self):
+            return {"PATH": ""}
+
+        def _resolve_tinytex_paths(self):
+            return []
+
+        def _rscript_path(self, env=None):
+            _ = env
+            return "/fake/Rscript"
+
+        def _r_tinytex_available(self, env=None):
+            _ = env
+            return True, "/fake/Rscript"
+
+        def _which(self, command, env=None):
+            _ = env
+            if command in {"latexmk", "xelatex", "lualatex", "tlmgr", "kpsewhich"}:
+                return f"/fake/{command}"
+            return None
+
+    def fake_run_doctor_command(cmd, *, env, timeout):
+        _ = env, timeout
+        target = cmd[-1]
+        if target in {"bbding.sty", "HaranoAjiMincho-Regular.otf"}:
+            return False, f"{target} not found"
+        return True, f"/tinytex/{target}"
+
+    monkeypatch.setattr(cli_module, "LaTeXCompiler", DummyCompiler)
+    monkeypatch.setattr(cli_module, "get_sdk_client", lambda *_args, **_kwargs: DummyProvider())
+    monkeypatch.setattr(
+        cli_module,
+        "get_available_fonts",
+        lambda font_dir=None, include_system=True: ["STSong", "STXihei", "STKaiti"],
+    )
+    monkeypatch.setattr(cli_module, "_probe_arxiv_reachable", lambda: (True, "HTTP 200"))
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_tlmgr_repository",
+        lambda tlmgr, *, env: (True, "repository: http://mirror.ctan.org"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_tlmgr_tgpagella_search",
+        lambda tlmgr, *, env: (True, "tex-gyre: tgpagella.sty"),
+    )
+    monkeypatch.setattr(cli_module, "_run_doctor_command", fake_run_doctor_command)
+
+    checks = cli_module._collect_arxiv_zh_doctor_checks(config_path)
+
+    assert any(
+        check.name == "TinyTeX 常见文件"
+        and check.status == "WARN"
+        and "bbding.sty" in check.message
+        and "HaranoAjiMincho-Regular.otf" in check.message
+        for check in checks
+    )
+
+
 def test_arxiv_zh_doctor_accepts_local_fonts_without_fontconfig(
     monkeypatch,
     tmp_path: Path,

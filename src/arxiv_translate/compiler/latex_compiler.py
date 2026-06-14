@@ -123,6 +123,9 @@ class CompileAttempt:
     error: Optional[str] = None
     category: str = "unknown"
     repairs: List[str] = field(default_factory=list)
+    engine_log_path: Optional[Path] = None
+    missing_file: Optional[str] = None
+    first_error: Optional[str] = None
 
 
 @dataclass
@@ -131,6 +134,7 @@ class CompilationResult:
     pdf_path: Optional[Path] = None
     log_content: Optional[str] = None
     error_message: Optional[str] = None
+    warning_message: Optional[str] = None
     engine_used: Optional[str] = None
     attempts: List[CompileAttempt] = field(default_factory=list)
     repaired_tex_path: Optional[Path] = None
@@ -188,6 +192,36 @@ class LaTeXCompiler:
             else:
                 env["OSFONTDIR"] = str(self.fonts_dir)
         return env
+
+    @staticmethod
+    def _with_texinputs(
+        env: Dict[str, str],
+        *,
+        build_path: Path,
+        tex_dir: Path,
+    ) -> Dict[str, str]:
+        patched = dict(env)
+        source_dir = tex_dir.parent / "source"
+        candidates = [build_path, tex_dir]
+        if source_dir.exists():
+            candidates.append(source_dir)
+
+        entries: List[str] = []
+        seen: set[str] = set()
+        for path in candidates:
+            resolved = str(path.resolve())
+            for entry in (resolved, f"{resolved}//"):
+                if entry in seen:
+                    continue
+                seen.add(entry)
+                entries.append(entry)
+
+        existing = patched.get("TEXINPUTS", "")
+        if existing:
+            entries.append(existing)
+        entries.append("")
+        patched["TEXINPUTS"] = os.pathsep.join(entries)
+        return patched
 
     def _resolve_tinytex_paths(self) -> List[Path]:
         if not self.use_tinytex:
@@ -308,6 +342,7 @@ class LaTeXCompiler:
         *,
         cwd: Path,
         log_path: Path,
+        engine_log_path: Path,
         env: Optional[Dict[str, str]] = None,
     ) -> Tuple[bool, str, Optional[str], Optional[int]]:
         header = f"$ {' '.join(cmd)}\n"
@@ -325,16 +360,26 @@ class LaTeXCompiler:
                 env=env or self._build_env(),
             )
             combined_log = process.stdout + "\n" + process.stderr
+            engine_log = self._read_engine_log(engine_log_path)
             with log_path.open("a", encoding="utf-8") as log_file:
                 log_file.write(combined_log)
                 log_file.write("\n")
+                if engine_log:
+                    log_file.write(
+                        "\n"
+                        f"===== TeX engine log: {engine_log_path} =====\n"
+                    )
+                    log_file.write(engine_log)
+                    if not engine_log.endswith("\n"):
+                        log_file.write("\n")
             full_log = log_path.read_text(encoding="utf-8", errors="replace")
+            diagnostic_log = combined_log + "\n" + engine_log
             if process.returncode != 0:
                 return (
                     False,
                     full_log,
                     f"R tinytex exited with code {process.returncode}. "
-                    f"{self._extract_error(combined_log)}",
+                    f"{self._extract_error(diagnostic_log)}",
                     process.returncode,
                 )
             return True, full_log, None, process.returncode
@@ -359,6 +404,15 @@ class LaTeXCompiler:
                 None,
             )
 
+    @staticmethod
+    def _read_engine_log(engine_log_path: Path) -> str:
+        if not engine_log_path.exists():
+            return ""
+        try:
+            return engine_log_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return ""
+
     def _compile_file_with_r_tinytex(
         self,
         *,
@@ -372,6 +426,7 @@ class LaTeXCompiler:
         available_engines: List[str],
         allow_pdflatex_cjk: bool,
         allow_shell_escape: bool,
+        max_repair_rounds: int,
         chinese_package: str,
         font_config: Optional[Any],
         env: Dict[str, str],
@@ -403,68 +458,119 @@ class LaTeXCompiler:
                 chinese_package=chinese_package,
                 font_dir=self.fonts_dir,
             )
-            candidate = build_path / f"{tex_file.stem}.{engine}.r_tinytex.tex"
-            candidate.write_text(engine_source, encoding="utf-8")
-            cmd = self._build_r_tinytex_command(
-                rscript=rscript,
-                engine=engine,
-                candidate=candidate,
-                build_path=build_path,
-                allow_shell_escape=allow_shell_escape,
-                install_packages=self.install_missing_packages,
-            )
-            success, log_content, error, returncode = self._run_r_tinytex_command(
-                cmd,
-                cwd=tex_file.parent,
-                log_path=log_path,
-                env=env,
-            )
-            last_log = log_content
-            last_error = error
-            attempt = CompileAttempt(
-                engine=engine,
-                command=cmd,
-                tex_path=candidate,
-                success=success,
-                returncode=returncode,
-                error=error,
-                category="success"
-                if success
-                else self._classify_compile_log(log_content, error),
-                repairs=[
-                    "r_tinytex_auto_install"
-                    if self.install_missing_packages
-                    else "r_tinytex"
-                ],
-            )
-            attempts.append(attempt)
+            applied_repairs: List[str] = []
+            source_repair_count = 0
+            base_repairs = [
+                "r_tinytex_auto_install"
+                if self.install_missing_packages
+                else "r_tinytex"
+            ]
 
-            built_pdf = self._find_built_pdf(
-                build_path,
-                candidate_stem=candidate.stem,
-                tex_stem=tex_file.stem,
-            )
-            if success and built_pdf and self._is_pdf_healthy(built_pdf):
-                shutil.copy2(built_pdf, output_path)
-                if self._is_pdf_healthy(output_path):
-                    self._sync_repaired_tex_on_success(
-                        tex_file,
-                        original_source,
+            for round_index in range(max_repair_rounds + 1):
+                if round_index == 0:
+                    candidate = build_path / f"{tex_file.stem}.{engine}.r_tinytex.tex"
+                else:
+                    candidate = build_path / (
+                        f"{tex_file.stem}.{engine}.r_tinytex.round{round_index + 1}.tex"
+                    )
+                candidate.write_text(engine_source, encoding="utf-8")
+                engine_log_path = build_path / f"{candidate.stem}.log"
+                cmd = self._build_r_tinytex_command(
+                    rscript=rscript,
+                    engine=engine,
+                    candidate=candidate,
+                    build_path=build_path,
+                    allow_shell_escape=allow_shell_escape,
+                    install_packages=self.install_missing_packages,
+                )
+                success, log_content, error, returncode = self._run_r_tinytex_command(
+                    cmd,
+                    cwd=tex_file.parent,
+                    log_path=log_path,
+                    engine_log_path=engine_log_path,
+                    env=env,
+                )
+                last_log = log_content
+                last_error = error
+                attempt_log = self._read_engine_log(engine_log_path) or log_content
+                missing_file = self._extract_missing_latex_file(attempt_log)
+                first_error = self._extract_error(attempt_log)
+                built_pdf = self._find_built_pdf(
+                    build_path,
+                    candidate_stem=candidate.stem,
+                    tex_stem=tex_file.stem,
+                )
+                has_healthy_pdf = bool(
+                    built_pdf and self._is_pdf_healthy(built_pdf)
+                )
+                category = (
+                    "success"
+                    if success and has_healthy_pdf
+                    else self._classify_compile_log(log_content, error)
+                )
+                if has_healthy_pdf and not success:
+                    category = "success_with_wrapper_warning"
+                attempt = CompileAttempt(
+                    engine=engine,
+                    command=cmd,
+                    tex_path=candidate,
+                    success=success or has_healthy_pdf,
+                    returncode=returncode,
+                    error=error,
+                    category=category,
+                    repairs=[*base_repairs, *applied_repairs],
+                    engine_log_path=engine_log_path if engine_log_path.exists() else None,
+                    missing_file=missing_file,
+                    first_error=first_error,
+                )
+                attempts.append(attempt)
+
+                if has_healthy_pdf and built_pdf:
+                    shutil.copy2(built_pdf, output_path)
+                    if self._is_pdf_healthy(output_path):
+                        self._sync_repaired_tex_on_success(
+                            tex_file,
+                            original_source,
+                            engine_source,
+                        )
+                        self._write_compile_attempts(diagnostic_path, attempts)
+                        warning_message = None
+                        if not success:
+                            warning_message = (
+                                "R tinytex returned a non-zero exit code, "
+                                "but a healthy PDF was produced and copied."
+                            )
+                        return CompilationResult(
+                            success=True,
+                            pdf_path=output_path,
+                            log_content=log_content,
+                            error_message=None,
+                            warning_message=warning_message,
+                            engine_used=engine,
+                            attempts=attempts,
+                            repaired_tex_path=candidate,
+                            diagnostic_path=diagnostic_path,
+                        )
+                    last_error = "Generated PDF failed integrity check after copy."
+                elif success:
+                    last_error = "Generated PDF failed integrity check (%PDF/%%EOF)."
+
+                patched_source, fallback_reason, changed = (
+                    self._apply_compile_file_log_fallbacks(
                         engine_source,
+                        log_content,
+                        build_path,
                     )
-                    self._write_compile_attempts(diagnostic_path, attempts)
-                    return CompilationResult(
-                        success=True,
-                        pdf_path=output_path,
-                        log_content=log_content,
-                        engine_used=engine,
-                        attempts=attempts,
-                        repaired_tex_path=candidate,
-                        diagnostic_path=diagnostic_path,
-                    )
-                last_error = "Generated PDF failed integrity check after copy."
-            elif success:
-                last_error = "Generated PDF failed integrity check (%PDF/%%EOF)."
+                )
+                if (
+                    not changed
+                    or fallback_reason in applied_repairs
+                    or source_repair_count >= max_repair_rounds
+                ):
+                    break
+                engine_source = patched_source
+                applied_repairs.append(fallback_reason)
+                source_repair_count += 1
 
         self._write_compile_attempts(diagnostic_path, attempts)
         log_content = log_path.read_text(encoding="utf-8", errors="replace")
@@ -506,6 +612,11 @@ class LaTeXCompiler:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("", encoding="utf-8")
         env = self._build_env()
+        env = self._with_texinputs(
+            env,
+            build_path=build_path,
+            tex_dir=tex_file.parent,
+        )
 
         if not tex_file.exists():
             message = f"TeX file not found: {tex_file}"
@@ -580,6 +691,7 @@ class LaTeXCompiler:
                 available_engines=available_engines,
                 allow_pdflatex_cjk=allow_pdflatex_cjk,
                 allow_shell_escape=allow_shell_escape,
+                max_repair_rounds=max_repair_rounds,
                 chinese_package=chinese_package,
                 font_config=font_config,
                 env=env,
@@ -1168,6 +1280,14 @@ class LaTeXCompiler:
             if changed:
                 return patched, reason, True
 
+        if self._has_axessibility_pdftex_primitive_error(log_content):
+            patched, reason, changed = self._apply_axessibility_fallback(
+                latex_source,
+                workspace_dir=workspace_dir,
+            )
+            if changed:
+                return patched, reason, True
+
         if self._extract_engine_conflict_primitive(log_content):
             patched, reason, changed = self._apply_pdftex_primitive_fallback(
                 latex_source,
@@ -1184,6 +1304,71 @@ class LaTeXCompiler:
             if changed:
                 return patched, reason, True
 
+        return latex_source, "no_fallback", False
+
+    @staticmethod
+    def _has_axessibility_pdftex_primitive_error(log: str) -> bool:
+        lowered = (log or "").lower()
+        if "axessibility" not in lowered or "undefined control sequence" not in lowered:
+            return False
+        return any(
+            f"\\{primitive}" in lowered
+            for primitive in (
+                "pdfcompresslevel",
+                "pdfobjcompresslevel",
+                "pdfoutput",
+                "pdfminorversion",
+                "pdfmapline",
+            )
+        )
+
+    @staticmethod
+    def _rewrite_remove_axessibility(text: str) -> Tuple[str, bool]:
+        pattern = re.compile(
+            r"\\(?P<cmd>RequirePackage|usepackage)"
+            r"(?P<opts>\[[^\]]*\])?\{(?P<pkgs>[^}]*)\}"
+        )
+        changed = False
+
+        def replace(match: re.Match[str]) -> str:
+            nonlocal changed
+            packages = [pkg.strip() for pkg in match.group("pkgs").split(",")]
+            if not any(pkg.lower() == "axessibility" for pkg in packages):
+                return match.group(0)
+
+            changed = True
+            kept = [pkg for pkg in packages if pkg and pkg.lower() != "axessibility"]
+            if not kept:
+                return ""
+            return (
+                f"\\{match.group('cmd')}"
+                f"{match.group('opts') or ''}"
+                + "{"
+                + ",".join(kept)
+                + "}"
+            )
+
+        patched = pattern.sub(replace, text)
+        return patched, changed
+
+    def _apply_axessibility_fallback(
+        self,
+        latex_source: str,
+        workspace_dir: Optional[Path] = None,
+    ) -> Tuple[str, str, bool]:
+        patched_source, source_changed = self._rewrite_remove_axessibility(
+            latex_source
+        )
+        workspace_changed = False
+        if workspace_dir and workspace_dir.exists():
+            workspace_changed = self._patch_workspace_text_files(
+                workspace_dir,
+                self._rewrite_remove_axessibility,
+                skip_main_tex=True,
+            )
+        changed = source_changed or workspace_changed
+        if changed:
+            return patched_source, "fallback_remove_axessibility", True
         return latex_source, "no_fallback", False
 
     @staticmethod
@@ -1223,6 +1408,11 @@ class LaTeXCompiler:
             "error": attempt.error,
             "category": attempt.category,
             "repairs": attempt.repairs,
+            "engine_log_path": (
+                str(attempt.engine_log_path) if attempt.engine_log_path else None
+            ),
+            "missing_file": attempt.missing_file,
+            "first_error": attempt.first_error,
         }
 
     def _write_compile_attempts(

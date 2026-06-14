@@ -14,6 +14,7 @@ ENGINE_CONFLICT_PRIMITIVES = (
     "pdfminorversion",
     "pdfcompresslevel",
     "pdfobjcompresslevel",
+    "pdfmapline",
 )
 ENGINE_CONFLICT_BRACED_COMMANDS = ("pdfinfo",)
 _ENGINE_CONFLICT_PATTERN = re.compile(
@@ -606,6 +607,53 @@ def _insert_after_documentclass_or_before_document(
     return latex_source + "\n" + insertion
 
 
+def _insert_after_package_line(
+    latex_source: str,
+    package_name: str,
+    insertion: str,
+) -> str:
+    package_match = re.search(
+        rf"(\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{{{re.escape(package_name)}\}}\s*\n?)",
+        latex_source,
+    )
+    if not package_match:
+        return _insert_after_documentclass_or_before_document(latex_source, insertion)
+    insert_pos = package_match.end()
+    return latex_source[:insert_pos] + insertion + latex_source[insert_pos:]
+
+
+def _font_command_present(latex_source: str, command: str) -> bool:
+    return bool(
+        re.search(
+            rf"\\{re.escape(command)}(?:\[[^\]]*\])?\{{",
+            latex_source,
+        )
+    )
+
+
+def _command_name(command_line: str) -> Optional[str]:
+    match = re.match(r"\\([A-Za-z@]+)", command_line.strip())
+    return match.group(1) if match else None
+
+
+def _ensure_font_commands_after_package(
+    latex_source: str,
+    *,
+    package_name: str,
+    font_commands: List[str],
+) -> str:
+    missing_commands = [
+        command
+        for command in font_commands
+        if (name := _command_name(command)) and not _font_command_present(latex_source, name)
+    ]
+    if not missing_commands:
+        return latex_source
+
+    insertion = "\n".join(["% Auto-injected local CJK fonts", *missing_commands]) + "\n"
+    return _insert_after_package_line(latex_source, package_name, insertion)
+
+
 def _wrap_pdflatex_cjk_document(latex_source: str) -> str:
     if "\\begin{CJK}" in latex_source:
         return latex_source
@@ -658,13 +706,17 @@ def inject_chinese_support_for_engine(
             latex_source,
             keep="luatexja",
         )
-        if _package_present(latex_source, "luatexja-fontspec"):
-            return latex_source
         font_commands = _resolved_font_commands(
             font_config,
             engine="lualatex",
             font_dir=font_dir,
         )
+        if _package_present(latex_source, "luatexja-fontspec"):
+            return _ensure_font_commands_after_package(
+                latex_source,
+                package_name="luatexja-fontspec",
+                font_commands=font_commands,
+            )
         injection_lines = [
             "",
             "% Auto-injected Chinese Support",
@@ -691,13 +743,17 @@ def inject_chinese_support_for_engine(
         return _wrap_pdflatex_cjk_document(latex_source)
 
     latex_source = _strip_engine_specific_chinese_support(latex_source, keep="xeCJK")
-    if _package_present(latex_source, "xeCJK"):
-        return latex_source
     font_commands = _resolved_font_commands(
         font_config,
         engine="xelatex",
         font_dir=font_dir,
     )
+    if _package_present(latex_source, "xeCJK"):
+        return _ensure_font_commands_after_package(
+            latex_source,
+            package_name="xeCJK",
+            font_commands=font_commands,
+        )
     injection_lines = [
         "",
         "% Auto-injected Chinese Support",

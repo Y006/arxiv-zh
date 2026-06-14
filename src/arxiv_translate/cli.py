@@ -3,6 +3,7 @@ import importlib.metadata as metadata
 import json
 import re
 import shutil
+import subprocess
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -675,9 +676,11 @@ def _arxiv_zh_compiler_from_config(config: Config) -> LaTeXCompiler:
         timeout=config.compilation.timeout,
         fonts_dir=config.fonts.dir,
         use_tinytex=config.compilation.use_tinytex,
+        tinytex_driver=config.compilation.tinytex_driver,
         tinytex_paths=config.compilation.tinytex_paths,
         install_missing_packages=config.compilation.install_missing_packages,
         install_timeout=config.compilation.install_timeout,
+        total_timeout=config.compilation.total_timeout,
         max_package_install_rounds=config.compilation.max_package_install_rounds,
     )
 
@@ -722,6 +725,84 @@ def _probe_arxiv_reachable(timeout: int = 8) -> tuple[bool, str]:
         return True, f"HTTP {status}"
     except Exception as exc:
         return False, str(exc)
+
+
+def _format_proxy_env(env: dict[str, str]) -> str:
+    proxy_names = (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    )
+    configured = [name for name in proxy_names if env.get(name)]
+    if not configured:
+        return "未设置 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY"
+    return "已设置：" + ", ".join(configured)
+
+
+def _run_doctor_command(
+    cmd: list[str],
+    *,
+    env: dict[str, str],
+    timeout: int,
+) -> tuple[bool, str]:
+    try:
+        process = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"命令超时（{timeout}s）：{' '.join(cmd)}"
+    except Exception as exc:
+        return False, str(exc)
+
+    output = (process.stdout + "\n" + process.stderr).strip()
+    if process.returncode == 0:
+        return True, output or "OK"
+    return False, output or f"exit code {process.returncode}"
+
+
+def _probe_tlmgr_repository(
+    tlmgr: str,
+    *,
+    env: dict[str, str],
+    timeout: int = 30,
+) -> tuple[bool, str]:
+    ok, detail = _run_doctor_command(
+        [tlmgr, "option", "repository"],
+        env=env,
+        timeout=timeout,
+    )
+    if not ok:
+        return False, detail
+    lines = [line.strip() for line in detail.splitlines() if line.strip()]
+    return True, lines[-1] if lines else detail
+
+
+def _probe_tlmgr_tgpagella_search(
+    tlmgr: str,
+    *,
+    env: dict[str, str],
+    timeout: int = 60,
+) -> tuple[bool, str]:
+    ok, detail = _run_doctor_command(
+        [tlmgr, "search", "--global", "--file", "/tgpagella.sty"],
+        env=env,
+        timeout=timeout,
+    )
+    if ok and ("tex-gyre" in detail.lower() or "tgpagella.sty" in detail.lower()):
+        return True, "可搜索 /tgpagella.sty（通常由 tex-gyre 提供）"
+    hint = (
+        "可能需要配置代理，或手动将 tlmgr repository 换到可访问的 CTAN 镜像。"
+    )
+    return False, f"{detail}; {hint}"
 
 
 async def _ping_arxiv_zh_llm(config: Config, api_key: str) -> str:
@@ -883,6 +964,52 @@ def _collect_arxiv_zh_doctor_checks(config_path: Optional[Path]) -> list[ArxivZh
                     )
                 )
 
+            rscript = compiler._rscript_path(env)
+            r_required = config.compilation.tinytex_driver == "r_tinytex"
+            checks.append(
+                _doctor_check(
+                    "Rscript",
+                    "PASS" if rscript else ("FAIL" if r_required else "WARN"),
+                    rscript
+                    or "未找到；auto 会降级到 latexmk，r_tinytex 强制模式不可用",
+                )
+            )
+            r_tinytex_ok, r_tinytex_detail = compiler._r_tinytex_available(env)
+            if r_tinytex_ok:
+                checks.append(
+                    _doctor_check(
+                        "R tinytex",
+                        "PASS",
+                        "官方 tinytex wrapper 可用，支持自动安装缺失包",
+                    )
+                )
+                checks.append(
+                    _doctor_check(
+                        "TinyTeX 自动补包",
+                        "PASS",
+                        "将优先使用 tinytex::latexmk(..., install_packages = TRUE)",
+                    )
+                )
+            else:
+                fallback_message = (
+                    f"{r_tinytex_detail}；auto 会降级到 latexmk + tlmgr hook。"
+                )
+                checks.append(
+                    _doctor_check(
+                        "R tinytex",
+                        "FAIL" if r_required else "WARN",
+                        fallback_message,
+                    )
+                )
+                checks.append(
+                    _doctor_check(
+                        "TinyTeX 自动补包",
+                        "FAIL" if r_required else "WARN",
+                        "未使用官方 R tinytex wrapper；"
+                        "请安装 R 包 tinytex 以启用推荐补包路径",
+                    )
+                )
+
         latexmk = compiler._which("latexmk", env)
         if config.compilation.prefer_latexmk:
             checks.append(
@@ -923,6 +1050,29 @@ def _collect_arxiv_zh_doctor_checks(config_path: Optional[Path]) -> list[ArxivZh
                     tlmgr or "未找到；TinyTeX 缺包自动安装将不可用",
                 )
             )
+            if tlmgr:
+                repo_ok, repo_detail = _probe_tlmgr_repository(tlmgr, env=env)
+                checks.append(
+                    _doctor_check(
+                        "tlmgr repository",
+                        "PASS" if repo_ok else "FAIL",
+                        repo_detail,
+                    )
+                )
+                search_ok, search_detail = _probe_tlmgr_tgpagella_search(
+                    tlmgr,
+                    env=env,
+                )
+                checks.append(
+                    _doctor_check(
+                        "tlmgr 缺包搜索",
+                        "PASS" if search_ok else "FAIL",
+                        search_detail,
+                    )
+                )
+
+        if config.compilation.use_tinytex:
+            checks.append(_doctor_check("代理环境", "PASS", _format_proxy_env(env)))
 
     ok, detail = _probe_arxiv_reachable()
     checks.append(
@@ -1569,11 +1719,13 @@ def translate(
                         timeout=config.compilation.timeout,
                         fonts_dir=config.fonts.dir,
                         use_tinytex=config.compilation.use_tinytex,
+                        tinytex_driver=config.compilation.tinytex_driver,
                         tinytex_paths=config.compilation.tinytex_paths,
                         install_missing_packages=(
                             config.compilation.install_missing_packages
                         ),
                         install_timeout=config.compilation.install_timeout,
+                        total_timeout=config.compilation.total_timeout,
                         max_package_install_rounds=(
                             config.compilation.max_package_install_rounds
                         ),

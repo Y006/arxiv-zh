@@ -34,6 +34,10 @@ agent 不应替用户填写、保存、回显真实 API Key，也不要要求用
 
 如果 `--doctor` 检查发现缺少 `latexmk`、`xelatex` 或 `lualatex`，agent 应判断当前环境可能无法正常编译 PDF。
 
+TinyTeX 推荐补包链路是 `Rscript` + R 包 `tinytex`。如果 `--doctor` 发现 `Rscript` 或 `R tinytex` 不可用，agent 应说明当前会降级到 `latexmk + tlmgr` hook，推荐用户安装 R 包 `tinytex` 以启用官方 `tinytex::latexmk(..., install_packages = TRUE)` 自动补包能力。
+
+如果 `--doctor` 中 `tlmgr repository` 或 `tlmgr 缺包搜索` 失败，agent 应优先判断是 CTAN 仓库或网络代理问题。agent 可以提示用户检查 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`，或手动切换到可访问的 CTAN 镜像，但不得未经确认永久执行 `tlmgr option repository ...`。
+
 此时应建议用户安装 TinyTeX：
 
 ```text

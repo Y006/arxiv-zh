@@ -80,4 +80,6 @@ export DEEPSEEK_API_KEY=sk-...
 
 如果配置里的 `fonts.auto_detect` 为 `true`，CLI 会优先扫描配置中的 `fonts.dir`，再回退到项目 `fonts/` 和系统字体。项目自带的 `.TTF` 字体可直接通过文件路径注入 LaTeX，不要求系统安装 `fontconfig`。
 
-编译默认按 TinyTeX 优先适配：配置会把常见 TinyTeX bin 目录加入 `PATH`，优先使用 `latexmk + xelatex`，遇到缺失 `.sty` / `.cls` 等文件时会尝试通过 `tlmgr search` 和 `tlmgr install` 自动安装缺包。首次编译需要下载包时可能较慢，`config.example.yaml` 已将编译超时放宽到 600 秒、缺包安装超时放宽到 1200 秒。
+编译默认按 TinyTeX 优先适配：配置会把常见 TinyTeX bin 目录加入 `PATH`。当 `Rscript` 和 R 包 `tinytex` 可用时，优先调用官方 `tinytex::latexmk(..., install_packages = TRUE)` 自动安装缺失 TeX 包；不可用时才降级到项目内置的 `latexmk + tlmgr` 补包 hook。首次补包可能较慢，`config.example.yaml` 已将单次编译超时放宽到 600 秒、缺包安装超时放宽到 1200 秒、R tinytex 总编译等待放宽到 7200 秒。
+
+`uv run arxiv-zh --doctor --config config.yaml` 会检查 `Rscript`、R 包 `tinytex`、`tlmgr repository`、`tlmgr search --global --file /tgpagella.sty` 和代理环境。项目不会自动换源或永久修改 `tlmgr option repository`；若检查失败，请配置代理或手动切换到可访问的 CTAN 镜像。

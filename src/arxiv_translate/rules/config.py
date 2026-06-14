@@ -71,6 +71,7 @@ class CompilationConfig(StrictConfigModel):
     max_repair_rounds: int = 3
     chinese_package: str = "auto"
     use_tinytex: bool = True
+    tinytex_driver: str = "auto"
     tinytex_paths: List[str] = Field(
         default_factory=lambda: [
             "~/Library/TinyTeX/bin/universal-darwin",
@@ -82,6 +83,7 @@ class CompilationConfig(StrictConfigModel):
     )
     install_missing_packages: bool = True
     install_timeout: int = 1200
+    total_timeout: int = 7200
     max_package_install_rounds: int = 8
 
     @field_validator("engine_policy")
@@ -115,6 +117,16 @@ class CompilationConfig(StrictConfigModel):
             )
         return v
 
+    @field_validator("tinytex_driver")
+    @classmethod
+    def validate_tinytex_driver(cls, v):
+        allowed = {"auto", "r_tinytex", "latexmk"}
+        if v not in allowed:
+            raise ValueError(
+                f"tinytex_driver must be one of {sorted(allowed)}, got '{v}'"
+            )
+        return v
+
     @field_validator("max_repair_rounds")
     @classmethod
     def validate_max_repair_rounds(cls, v):
@@ -122,7 +134,7 @@ class CompilationConfig(StrictConfigModel):
             raise ValueError("max_repair_rounds must be non-negative")
         return v
 
-    @field_validator("timeout", "install_timeout")
+    @field_validator("timeout", "install_timeout", "total_timeout")
     @classmethod
     def validate_positive_timeout(cls, v):
         if v < 1:

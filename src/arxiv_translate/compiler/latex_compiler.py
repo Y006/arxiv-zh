@@ -152,9 +152,11 @@ class LaTeXCompiler:
         fonts_dir: Optional[Union[str, Path]] = None,
         *,
         use_tinytex: bool = True,
+        tinytex_driver: str = "auto",
         tinytex_paths: Optional[List[str]] = None,
         install_missing_packages: bool = True,
         install_timeout: int = 1200,
+        total_timeout: int = 7200,
         max_package_install_rounds: int = 8,
     ):
         self.timeout = timeout
@@ -162,9 +164,11 @@ class LaTeXCompiler:
         self.engines = ["xelatex", "lualatex", "pdflatex"]
         self.fonts_dir = Path(fonts_dir).resolve() if fonts_dir else None
         self.use_tinytex = use_tinytex
+        self.tinytex_driver = tinytex_driver
         self.tinytex_paths = list(tinytex_paths or self.DEFAULT_TINYTEX_PATHS)
         self.install_missing_packages = install_missing_packages
         self.install_timeout = install_timeout
+        self.total_timeout = total_timeout
         self.max_package_install_rounds = max_package_install_rounds
 
     def inject_chinese_support(self, latex_source: str) -> str:
@@ -212,6 +216,262 @@ class LaTeXCompiler:
     def _which(self, command: str, env: Optional[Dict[str, str]] = None) -> Optional[str]:
         path = (env or self._build_env()).get("PATH")
         return shutil.which(command, path=path)
+
+    def _rscript_path(self, env: Optional[Dict[str, str]] = None) -> Optional[str]:
+        return self._which("Rscript", env)
+
+    def _r_tinytex_available(
+        self,
+        env: Optional[Dict[str, str]] = None,
+        *,
+        timeout: int = 30,
+    ) -> Tuple[bool, str]:
+        rscript = self._rscript_path(env)
+        if not rscript:
+            return False, "Rscript not found"
+        try:
+            process = subprocess.run(
+                [
+                    rscript,
+                    "--vanilla",
+                    "-e",
+                    (
+                        "quit(status = if "
+                        "(requireNamespace('tinytex', quietly = TRUE)) 0 else 1)"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+                errors="replace",
+                env=env or self._build_env(),
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"R tinytex probe timed out after {timeout}s"
+        except Exception as exc:
+            return False, str(exc)
+
+        detail = (process.stdout + "\n" + process.stderr).strip()
+        if process.returncode == 0:
+            return True, rscript
+        return False, detail or "R package tinytex not installed"
+
+    def _resolve_compile_driver(self, env: Dict[str, str]) -> Tuple[str, str]:
+        if self.tinytex_driver == "latexmk" or not self.use_tinytex:
+            return "latexmk", "configured"
+
+        r_available, detail = self._r_tinytex_available(env)
+        if self.tinytex_driver == "r_tinytex":
+            if not r_available:
+                return "missing_r_tinytex", detail
+            return "r_tinytex", detail
+
+        if r_available:
+            return "r_tinytex", detail
+        return "latexmk", detail
+
+    def _build_r_tinytex_command(
+        self,
+        *,
+        rscript: str,
+        engine: str,
+        candidate: Path,
+        build_path: Path,
+        allow_shell_escape: bool,
+    ) -> List[str]:
+        expression = (
+            "args <- commandArgs(trailingOnly = TRUE); "
+            "file <- args[[1]]; "
+            "engine <- args[[2]]; "
+            "output_dir <- args[[3]]; "
+            "shell_escape <- identical(args[[4]], 'true'); "
+            "engine_args <- c('-interaction=nonstopmode', '-file-line-error', "
+            "paste0('-output-directory=', output_dir)); "
+            "if (shell_escape) engine_args <- c(engine_args, '-shell-escape'); "
+            "tinytex::latexmk(file, engine = engine, engine_args = engine_args, "
+            "emulation = TRUE, clean = FALSE, install_packages = TRUE)"
+        )
+        return [
+            rscript,
+            "--vanilla",
+            "-e",
+            expression,
+            str(candidate),
+            engine,
+            str(build_path),
+            "true" if allow_shell_escape else "false",
+        ]
+
+    def _run_r_tinytex_command(
+        self,
+        cmd: List[str],
+        *,
+        cwd: Path,
+        log_path: Path,
+        env: Optional[Dict[str, str]] = None,
+    ) -> Tuple[bool, str, Optional[str], Optional[int]]:
+        header = f"$ {' '.join(cmd)}\n"
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(header)
+        try:
+            process = subprocess.run(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=self.total_timeout,
+                encoding="utf-8",
+                errors="replace",
+                env=env or self._build_env(),
+            )
+            combined_log = process.stdout + "\n" + process.stderr
+            with log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(combined_log)
+                log_file.write("\n")
+            full_log = log_path.read_text(encoding="utf-8", errors="replace")
+            if process.returncode != 0:
+                return (
+                    False,
+                    full_log,
+                    f"R tinytex exited with code {process.returncode}. "
+                    f"{self._extract_error(combined_log)}",
+                    process.returncode,
+                )
+            return True, full_log, None, process.returncode
+        except subprocess.TimeoutExpired:
+            message = f"R tinytex compilation timed out after {self.total_timeout}s"
+            with log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(message + "\n")
+            return (
+                False,
+                log_path.read_text(encoding="utf-8", errors="replace"),
+                message,
+                None,
+            )
+        except Exception as exc:
+            message = str(exc)
+            with log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(message + "\n")
+            return (
+                False,
+                log_path.read_text(encoding="utf-8", errors="replace"),
+                message,
+                None,
+            )
+
+    def _compile_file_with_r_tinytex(
+        self,
+        *,
+        tex_file: Path,
+        output_path: Path,
+        build_path: Path,
+        log_path: Path,
+        diagnostic_path: Path,
+        original_source: str,
+        prepared_source: str,
+        available_engines: List[str],
+        allow_pdflatex_cjk: bool,
+        allow_shell_escape: bool,
+        chinese_package: str,
+        font_config: Optional[Any],
+        env: Dict[str, str],
+    ) -> CompilationResult:
+        rscript = self._rscript_path(env)
+        if not rscript:
+            message = "R tinytex driver selected but Rscript was not found."
+            log_path.write_text(message, encoding="utf-8")
+            write_compile_error_summary(
+                log_path,
+                log_path.parent / "compile_error_summary.md",
+            )
+            return CompilationResult(
+                success=False,
+                log_content=message,
+                error_message=message,
+                diagnostic_path=diagnostic_path,
+            )
+
+        attempts: List[CompileAttempt] = []
+        last_log = ""
+        last_error: Optional[str] = None
+        for engine in available_engines:
+            engine_source = inject_chinese_support_for_engine(
+                prepared_source,
+                engine=engine,
+                font_config=font_config,
+                allow_pdflatex_cjk=allow_pdflatex_cjk,
+                chinese_package=chinese_package,
+                font_dir=self.fonts_dir,
+            )
+            candidate = build_path / f"{tex_file.stem}.{engine}.r_tinytex.tex"
+            candidate.write_text(engine_source, encoding="utf-8")
+            cmd = self._build_r_tinytex_command(
+                rscript=rscript,
+                engine=engine,
+                candidate=candidate,
+                build_path=build_path,
+                allow_shell_escape=allow_shell_escape,
+            )
+            success, log_content, error, returncode = self._run_r_tinytex_command(
+                cmd,
+                cwd=tex_file.parent,
+                log_path=log_path,
+                env=env,
+            )
+            last_log = log_content
+            last_error = error
+            attempt = CompileAttempt(
+                engine=engine,
+                command=cmd,
+                tex_path=candidate,
+                success=success,
+                returncode=returncode,
+                error=error,
+                category="success"
+                if success
+                else self._classify_compile_log(log_content, error),
+                repairs=["r_tinytex_auto_install"],
+            )
+            attempts.append(attempt)
+
+            built_pdf = self._find_built_pdf(
+                build_path,
+                candidate_stem=candidate.stem,
+                tex_stem=tex_file.stem,
+            )
+            if success and built_pdf and self._is_pdf_healthy(built_pdf):
+                shutil.copy2(built_pdf, output_path)
+                if self._is_pdf_healthy(output_path):
+                    self._sync_repaired_tex_on_success(
+                        tex_file,
+                        original_source,
+                        engine_source,
+                    )
+                    self._write_compile_attempts(diagnostic_path, attempts)
+                    return CompilationResult(
+                        success=True,
+                        pdf_path=output_path,
+                        log_content=log_content,
+                        engine_used=engine,
+                        attempts=attempts,
+                        repaired_tex_path=candidate,
+                        diagnostic_path=diagnostic_path,
+                    )
+                last_error = "Generated PDF failed integrity check after copy."
+            elif success:
+                last_error = "Generated PDF failed integrity check (%PDF/%%EOF)."
+
+        self._write_compile_attempts(diagnostic_path, attempts)
+        log_content = log_path.read_text(encoding="utf-8", errors="replace")
+        write_compile_error_summary(log_path, log_path.parent / "compile_error_summary.md")
+        return CompilationResult(
+            success=False,
+            log_content=log_content or last_log,
+            error_message=last_error or "R tinytex compilation failed.",
+            attempts=attempts,
+            diagnostic_path=diagnostic_path,
+        )
 
     def compile_file(
         self,
@@ -279,6 +539,43 @@ class LaTeXCompiler:
             latex_source=prepared_source,
             allow_pdflatex_cjk=allow_pdflatex_cjk,
         )
+        compile_driver, driver_detail = self._resolve_compile_driver(env)
+        if compile_driver == "missing_r_tinytex":
+            message = (
+                "R tinytex driver requested but unavailable: "
+                f"{driver_detail or 'unknown reason'}"
+            )
+            log_path.write_text(message, encoding="utf-8")
+            self._write_compile_attempts(diagnostic_path, attempts)
+            write_compile_error_summary(log_path, summary_path)
+            return CompilationResult(
+                success=False,
+                log_content=message,
+                error_message=message,
+                attempts=attempts,
+                diagnostic_path=diagnostic_path,
+            )
+        if compile_driver == "r_tinytex":
+            self._append_compile_log(
+                log_path,
+                "Using R tinytex driver for automatic package installation.",
+            )
+            return self._compile_file_with_r_tinytex(
+                tex_file=tex_file,
+                output_path=output_path,
+                build_path=build_path,
+                log_path=log_path,
+                diagnostic_path=diagnostic_path,
+                original_source=original_source,
+                prepared_source=prepared_source,
+                available_engines=available_engines,
+                allow_pdflatex_cjk=allow_pdflatex_cjk,
+                allow_shell_escape=allow_shell_escape,
+                chinese_package=chinese_package,
+                font_config=font_config,
+                env=env,
+            )
+
         if prefer_latexmk and self._which("latexmk", env):
             command_mode = "latexmk"
         else:
@@ -299,6 +596,13 @@ class LaTeXCompiler:
                 error_message=message,
                 attempts=attempts,
                 diagnostic_path=diagnostic_path,
+            )
+
+        if self.tinytex_driver == "auto" and self.use_tinytex and driver_detail:
+            self._append_compile_log(
+                log_path,
+                "R tinytex driver unavailable; falling back to latexmk: "
+                f"{driver_detail}",
             )
 
         last_log = ""

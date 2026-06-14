@@ -44,6 +44,7 @@ compilation:
   max_repair_rounds: 3
   chinese_package: auto
   use_tinytex: true
+  tinytex_driver: auto
   tinytex_paths:
     - ~/Library/TinyTeX/bin/universal-darwin
     - ~/.TinyTeX/bin/*
@@ -52,6 +53,7 @@ compilation:
     - /Library/TeX/texbin
   install_missing_packages: true
   install_timeout: 1200
+  total_timeout: 7200
   max_package_install_rounds: 8
 
 parser:

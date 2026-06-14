@@ -464,10 +464,18 @@ def test_arxiv_zh_doctor_collects_success(monkeypatch, tmp_path: Path):
             pass
 
         def _build_env(self):
-            return {"PATH": ""}
+            return {"PATH": "", "HTTPS_PROXY": "http://127.0.0.1:7890"}
 
         def _resolve_tinytex_paths(self):
             return [tinytex_bin]
+
+        def _rscript_path(self, env=None):
+            _ = env
+            return "/fake/Rscript"
+
+        def _r_tinytex_available(self, env=None):
+            _ = env
+            return True, "/fake/Rscript"
 
         def _which(self, command, env=None):
             _ = env
@@ -491,6 +499,16 @@ def test_arxiv_zh_doctor_collects_success(monkeypatch, tmp_path: Path):
         lambda font_dir=None, include_system=True: ["STSong", "STXihei", "STKaiti"],
     )
     monkeypatch.setattr(cli_module, "_probe_arxiv_reachable", lambda: (True, "HTTP 200"))
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_tlmgr_repository",
+        lambda tlmgr, *, env: (True, "repository: https://mirror.ctan.org"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_tlmgr_tgpagella_search",
+        lambda tlmgr, *, env: (True, "tex-gyre: tgpagella.sty"),
+    )
 
     checks = cli_module._collect_arxiv_zh_doctor_checks(config_path)
 
@@ -500,6 +518,24 @@ def test_arxiv_zh_doctor_collects_success(monkeypatch, tmp_path: Path):
         for check in checks
     )
     assert any(check.name == "LaTeX 引擎" and check.status == "PASS" for check in checks)
+    assert any(check.name == "Rscript" and check.status == "PASS" for check in checks)
+    assert any(check.name == "R tinytex" and check.status == "PASS" for check in checks)
+    assert any(
+        check.name == "TinyTeX 自动补包" and check.status == "PASS"
+        for check in checks
+    )
+    assert any(
+        check.name == "tlmgr repository" and check.status == "PASS"
+        for check in checks
+    )
+    assert any(
+        check.name == "tlmgr 缺包搜索" and check.status == "PASS"
+        for check in checks
+    )
+    assert any(
+        check.name == "代理环境" and "HTTPS_PROXY" in check.message
+        for check in checks
+    )
 
 
 def test_arxiv_zh_doctor_reports_missing_key_without_ping(monkeypatch, tmp_path: Path):
@@ -538,6 +574,91 @@ def test_arxiv_zh_doctor_reports_missing_key_without_ping(monkeypatch, tmp_path:
     assert any(check.name == "API Key" and check.status == "FAIL" for check in checks)
     assert any(
         check.name == "DeepSeek 连通性" and check.status == "WARN"
+        for check in checks
+    )
+
+
+def test_arxiv_zh_doctor_reports_tinytex_package_network_failure(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import arxiv_translate.cli as cli_module
+
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        llm:
+          key: sk-test
+        paths:
+          output_dir: ./translated-output
+        fonts:
+          auto_detect: false
+          main: STSong
+          sans: STXihei
+          mono: STKaiti
+        compilation:
+          enabled: true
+        """,
+    )
+
+    class DummyProvider:
+        async def ping(self):
+            return "hi"
+
+    class DummyCompiler:
+        def __init__(self, **_kwargs):
+            pass
+
+        def _build_env(self):
+            return {"PATH": ""}
+
+        def _resolve_tinytex_paths(self):
+            return []
+
+        def _rscript_path(self, env=None):
+            _ = env
+            return None
+
+        def _r_tinytex_available(self, env=None):
+            _ = env
+            return False, "Rscript not found"
+
+        def _which(self, command, env=None):
+            _ = env
+            if command in {"latexmk", "xelatex", "tlmgr"}:
+                return f"/fake/{command}"
+            return None
+
+    monkeypatch.setattr(cli_module, "LaTeXCompiler", DummyCompiler)
+    monkeypatch.setattr(cli_module, "get_sdk_client", lambda *_args, **_kwargs: DummyProvider())
+    monkeypatch.setattr(
+        cli_module,
+        "get_available_fonts",
+        lambda font_dir=None, include_system=True: ["STSong", "STXihei", "STKaiti"],
+    )
+    monkeypatch.setattr(cli_module, "_probe_arxiv_reachable", lambda: (True, "HTTP 200"))
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_tlmgr_repository",
+        lambda tlmgr, *, env: (True, "repository: http://mirror.ctan.org"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_tlmgr_tgpagella_search",
+        lambda tlmgr, *, env: (
+            False,
+            "timeout; 可能需要配置代理，或手动换 CTAN 镜像",
+        ),
+    )
+
+    checks = cli_module._collect_arxiv_zh_doctor_checks(config_path)
+
+    assert any(check.name == "Rscript" and check.status == "WARN" for check in checks)
+    assert any(check.name == "R tinytex" and check.status == "WARN" for check in checks)
+    assert any(
+        check.name == "tlmgr 缺包搜索"
+        and check.status == "FAIL"
+        and "代理" in check.message
         for check in checks
     )
 

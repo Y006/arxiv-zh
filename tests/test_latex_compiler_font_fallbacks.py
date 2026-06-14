@@ -256,6 +256,128 @@ def test_compile_file_installs_missing_tinytex_package(
     assert any("tlmgr_install:enumitem" in attempt.repairs for attempt in result.attempts)
 
 
+def test_compile_file_auto_uses_r_tinytex_when_available(monkeypatch, tmp_path: Path):
+    build_dir = tmp_path / "build"
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\\begin{document}x\\end{document}",
+        encoding="utf-8",
+    )
+    commands = []
+
+    def fake_which(name, path=None):
+        _ = path
+        if name == "Rscript":
+            return "/usr/bin/Rscript"
+        return None
+
+    def fake_run(cmd, **kwargs):
+        commands.append((cmd, kwargs))
+        if cmd[0] == "/usr/bin/Rscript" and "requireNamespace" in cmd[3]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[0] == "/usr/bin/Rscript":
+            assert kwargs["timeout"] == 4321
+            candidate = Path(cmd[4])
+            output_dir = Path(cmd[6])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / f"{candidate.stem}.pdf").write_bytes(
+                b"%PDF-1.5\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+            )
+            return SimpleNamespace(returncode=0, stdout="compiled", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler(total_timeout=4321).compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+    )
+
+    assert result.success is True
+    assert result.engine_used == "xelatex"
+    assert result.pdf_path == tmp_path / "pdf" / "main_zh.pdf"
+    assert any("tinytex::latexmk" in cmd[3] for cmd, _kwargs in commands)
+    assert not [cmd for cmd, _kwargs in commands if cmd[0] == "latexmk"]
+
+
+def test_compile_file_auto_falls_back_to_latexmk_when_r_tinytex_missing(
+    monkeypatch,
+    tmp_path: Path,
+):
+    build_dir = tmp_path / "build"
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\\begin{document}x\\end{document}",
+        encoding="utf-8",
+    )
+    commands = []
+
+    def fake_which(name, path=None):
+        _ = path
+        if name == "latexmk":
+            return "/tinytex/bin/latexmk"
+        return None
+
+    def fake_run(cmd, **kwargs):
+        commands.append(cmd)
+        if cmd[0] == "latexmk":
+            tex_arg = Path(cmd[-1])
+            build_dir.mkdir(parents=True, exist_ok=True)
+            (build_dir / f"{tex_arg.stem}.pdf").write_bytes(
+                b"%PDF-1.5\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+            )
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler().compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+    )
+
+    assert result.success is True
+    assert commands and commands[0][0] == "latexmk"
+
+
+def test_compile_file_forced_r_tinytex_reports_missing_wrapper(
+    monkeypatch,
+    tmp_path: Path,
+):
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\\begin{document}x\\end{document}",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        lambda _name, path=None: None,
+    )
+
+    result = LaTeXCompiler(tinytex_driver="r_tinytex").compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=tmp_path / "build",
+    )
+
+    assert result.success is False
+    assert "R tinytex driver requested but unavailable" in result.error_message
+
+
 def test_prepare_compile_inputs_sanitizes_unicode_engine_conflicts(tmp_path: Path):
     tex_file = tmp_path / "main_zh.tex"
     tex_file.write_text(

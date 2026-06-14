@@ -15,8 +15,10 @@ def test_compilation_config_exposes_compile_fallback_defaults():
     assert config.timeout == 600
     assert config.prefer_latexmk is True
     assert config.use_tinytex is True
+    assert config.tinytex_driver == "auto"
     assert config.install_missing_packages is True
     assert config.install_timeout == 1200
+    assert config.total_timeout == 7200
     assert config.max_package_install_rounds == 8
     assert any("TinyTeX" in path for path in config.tinytex_paths)
 
@@ -31,3 +33,10 @@ def test_compilation_config_rejects_invalid_timeouts():
         CompilationConfig(timeout=0)
     with pytest.raises(ValueError, match="positive"):
         CompilationConfig(install_timeout=0)
+    with pytest.raises(ValueError, match="positive"):
+        CompilationConfig(total_timeout=0)
+
+
+def test_compilation_config_rejects_unknown_tinytex_driver():
+    with pytest.raises(ValueError, match="tinytex_driver"):
+        CompilationConfig(tinytex_driver="texliveonfly")

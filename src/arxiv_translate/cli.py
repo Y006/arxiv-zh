@@ -306,6 +306,7 @@ def _load_config_for_arxiv_zh(config_path: Optional[Path]) -> Config:
 
     if config_path is None:
         config.fonts.auto_detect = True
+        config.compilation.tinytex_driver = "r_tinytex"
 
     if config.fonts.auto_detect:
         detected_fonts = detect_cjk_fonts(get_available_fonts(font_dir=resolved_font_dir))
@@ -619,6 +620,8 @@ def _compile_arxiv_zh_translated_tex(
             "failed",
             error=error,
             attempts_path=str(result.diagnostic_path) if result.diagnostic_path else None,
+            driver=getattr(result, "driver", None),
+            driver_detail=getattr(result, "driver_detail", None),
         )
         _set_metadata_run_status(metadata_data, "compile_failed")
         _write_arxiv_zh_metadata(layout, metadata_data)
@@ -633,6 +636,8 @@ def _compile_arxiv_zh_translated_tex(
         engine_used=result.engine_used,
         attempts_path=str(result.diagnostic_path) if result.diagnostic_path else None,
         warning=getattr(result, "warning_message", None),
+        driver=getattr(result, "driver", None),
+        driver_detail=getattr(result, "driver_detail", None),
         repaired_tex_path=(
             str(result.repaired_tex_path) if result.repaired_tex_path else None
         ),
@@ -847,6 +852,7 @@ COMMON_TINYTEX_PROBE_FILES = (
     "ifsym.sty",
     "algpseudocodex.sty",
     "bbm.sty",
+    "nicematrix.sty",
     "newtxmath.sty",
     "HaranoAjiMincho-Regular.otf",
 )

@@ -339,6 +339,71 @@ def test_arxiv_zh_compile_only_compiles_existing_translation_without_key(
     assert metadata["run"]["compilation"]["completed"] is True
 
 
+def test_arxiv_zh_compile_only_records_wrapper_warning_as_completed(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import arxiv_translate.cli as cli_module
+
+    config_path = _write_config(
+        tmp_path / "config.yaml",
+        """
+        paths:
+          output_dir: ./translated-output
+        fonts:
+          auto_detect: false
+        compilation:
+          enabled: false
+        """,
+    )
+    output_dir = tmp_path / "translated-output" / "arxiv-2410.24164v1"
+    translated_dir = output_dir / "translated"
+    translated_dir.mkdir(parents=True)
+    translated_tex = translated_dir / "main_zh.tex"
+    translated_tex.write_text(
+        "\\documentclass{article}\\begin{document}中文\\end{document}",
+        encoding="utf-8",
+    )
+
+    class DummyCompiler:
+        def __init__(self, **_kwargs):
+            pass
+
+        def compile_file(self, tex_file, output_path, **_kwargs):
+            assert tex_file == translated_tex
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"%PDF-1.5\n%%EOF\n")
+            return SimpleNamespace(
+                success=True,
+                pdf_path=output_path,
+                engine_used="lualatex",
+                diagnostic_path=tmp_path / "attempts.json",
+                repaired_tex_path=None,
+                warning_message="R tinytex returned non-zero but PDF is healthy.",
+            )
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(cli_module, "_arxiv_zh_dotenv_paths", lambda: [])
+    monkeypatch.setattr(cli_module, "LaTeXCompiler", DummyCompiler)
+
+    options, config = cli_module._resolve_arxiv_zh_options(
+        arxiv_id="2410.24164v1",
+        config=config_path,
+        require_api_key=False,
+    )
+    cli_module._run_arxiv_zh_compile_only(
+        arxiv_id="2410.24164v1",
+        options=options,
+        config=config,
+    )
+
+    metadata = json.loads((output_dir / "metadata.json").read_text(encoding="utf-8"))
+    compilation = metadata["run"]["compilation"]
+    assert compilation["status"] == "completed"
+    assert compilation["completed"] is True
+    assert "healthy" in compilation["warning"]
+
+
 def test_arxiv_zh_pipeline_skips_download_and_translation_when_metadata_complete(
     monkeypatch,
     tmp_path: Path,
@@ -787,7 +852,7 @@ def test_arxiv_zh_doctor_reports_common_tinytex_file_risks(
     def fake_run_doctor_command(cmd, *, env, timeout):
         _ = env, timeout
         target = cmd[-1]
-        if target in {"bbding.sty", "HaranoAjiMincho-Regular.otf"}:
+        if target in {"bbding.sty", "nicematrix.sty", "HaranoAjiMincho-Regular.otf"}:
             return False, f"{target} not found"
         return True, f"/tinytex/{target}"
 
@@ -817,6 +882,7 @@ def test_arxiv_zh_doctor_reports_common_tinytex_file_risks(
         check.name == "TinyTeX 常见文件"
         and check.status == "WARN"
         and "bbding.sty" in check.message
+        and "nicematrix.sty" in check.message
         and "HaranoAjiMincho-Regular.otf" in check.message
         for check in checks
     )
@@ -932,6 +998,7 @@ def test_arxiv_zh_default_config_uses_detected_cjk_fonts(monkeypatch, tmp_path: 
     assert config.fonts.main == "Songti SC"
     assert config.fonts.sans == "Heiti SC"
     assert config.fonts.mono == "Heiti SC"
+    assert config.compilation.tinytex_driver == "r_tinytex"
 
 
 def test_arxiv_zh_default_config_prefers_project_fonts(monkeypatch, tmp_path: Path):

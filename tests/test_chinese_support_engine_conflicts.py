@@ -249,9 +249,18 @@ def test_inject_chinese_support_adds_luatexja_fonts_when_package_exists(tmp_path
 
     font_path_option = f"Path={{{fonts_dir.as_posix()}/}}"
     assert patched.count("\\usepackage{luatexja-fontspec}") == 1
-    assert f"\\setmainjfont[{font_path_option}]{{STSONG.TTF}}" in patched
-    assert f"\\setsansjfont[{font_path_option}]{{STXIHEI.TTF}}" in patched
-    assert f"\\setmonojfont[{font_path_option}]{{STKAITI.TTF}}" in patched
+    assert (
+        f"\\setmainjfont[{font_path_option},BoldFont={{STSONG.TTF}}"
+        in patched
+    )
+    assert (
+        f"\\setsansjfont[{font_path_option},BoldFont={{STXIHEI.TTF}}"
+        in patched
+    )
+    assert (
+        f"\\setmonojfont[{font_path_option},BoldFont={{STKAITI.TTF}}"
+        in patched
+    )
 
 
 def test_inject_chinese_support_uses_font_file_paths(tmp_path):
@@ -273,6 +282,31 @@ def test_inject_chinese_support_uses_font_file_paths(tmp_path):
             "main": "STSONG.TTF",
             "sans": "STXIHEI.TTF",
             "mono": "STKAITI.TTF",
+            "auto_detect": False,
+        },
+    )
+
+    font_path_option = f"Path={{{fonts_dir.as_posix()}/}}"
+    assert f"\\setCJKmainfont[{font_path_option}]{{STSONG.TTF}}" in patched
+    assert f"\\setCJKsansfont[{font_path_option}]{{STXIHEI.TTF}}" in patched
+    assert f"\\setCJKmonofont[{font_path_option}]{{STKAITI.TTF}}" in patched
+
+
+def test_inject_chinese_support_resolves_stem_config_to_local_font_files(tmp_path):
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    for filename in ("STSONG.TTF", "STXIHEI.TTF", "STKAITI.TTF"):
+        (fonts_dir / filename).write_bytes(b"not a real font")
+
+    source = "\\documentclass{article}\n\\begin{document}\n中文\n\\end{document}\n"
+    patched = inject_chinese_support_for_engine(
+        source,
+        engine="xelatex",
+        font_config={
+            "dir": str(fonts_dir),
+            "main": "STSONG",
+            "sans": "STXIHEI",
+            "mono": "STKAITI",
             "auto_detect": False,
         },
     )

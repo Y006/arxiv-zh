@@ -18,6 +18,18 @@ from .chinese_support import (
     normalize_unicode_engine_source,
 )
 
+SAFE_REDEFINED_COMMANDS = {
+    "red",
+    "todo",
+    "TODO",
+    "cmark",
+    "xmark",
+    "Cmark",
+    "Xmark",
+    "markover",
+    "greencircle",
+}
+
 
 def _first_log_context(
     lines: List[str],
@@ -126,6 +138,8 @@ class CompileAttempt:
     engine_log_path: Optional[Path] = None
     missing_file: Optional[str] = None
     first_error: Optional[str] = None
+    driver: Optional[str] = None
+    driver_detail: Optional[str] = None
 
 
 @dataclass
@@ -139,6 +153,8 @@ class CompilationResult:
     attempts: List[CompileAttempt] = field(default_factory=list)
     repaired_tex_path: Optional[Path] = None
     diagnostic_path: Optional[Path] = None
+    driver: Optional[str] = None
+    driver_detail: Optional[str] = None
 
 
 class LaTeXCompiler:
@@ -312,7 +328,35 @@ class LaTeXCompiler:
         install_packages: bool,
     ) -> List[str]:
         install_packages_value = "TRUE" if install_packages else "FALSE"
+        tlmgr_repository_setup = (
+            "tlmgr_repo <- Sys.getenv('ARXIV_ZH_TLMGR_REPOSITORY', unset = ''); "
+            "tlmgr_path <- Sys.getenv('ARXIV_ZH_TLMGR_PATH', unset = ''); "
+            "tlmgr_proxy <- Sys.getenv('ARXIV_ZH_TLMGR_PROXY', unset = ''); "
+            "if (nzchar(tlmgr_repo)) { "
+            "if (!nzchar(tlmgr_path)) tlmgr_path <- Sys.which('tlmgr'); "
+            "if (nzchar(tlmgr_path)) { "
+            "tlmgr_wrapper_dir <- tempfile('arxiv_zh_tlmgr_'); "
+            "dir.create(tlmgr_wrapper_dir, recursive = TRUE, showWarnings = FALSE); "
+            "tlmgr_wrapper <- file.path(tlmgr_wrapper_dir, 'tlmgr'); "
+            "proxy_lines <- character(); "
+            "if (nzchar(tlmgr_proxy)) proxy_lines <- c("
+            "paste('export all_proxy=', shQuote(tlmgr_proxy), sep = ''), "
+            "paste('export http_proxy=', shQuote(tlmgr_proxy), sep = ''), "
+            "paste('export https_proxy=', shQuote(tlmgr_proxy), sep = ''), "
+            "paste('export ALL_PROXY=', shQuote(tlmgr_proxy), sep = ''), "
+            "paste('export HTTP_PROXY=', shQuote(tlmgr_proxy), sep = ''), "
+            "paste('export HTTPS_PROXY=', shQuote(tlmgr_proxy), sep = '')); "
+            "writeLines(c('#!/bin/sh', proxy_lines, "
+            "paste('exec', shQuote(tlmgr_path), '--repository', "
+            "shQuote(tlmgr_repo), '\"$@\"')), tlmgr_wrapper); "
+            "Sys.chmod(tlmgr_wrapper, '0755'); "
+            "options(tinytex.tlmgr.path = tlmgr_wrapper); "
+            "} "
+            "}; "
+        )
         expression = (
+            tlmgr_repository_setup
+            +
             "args <- commandArgs(trailingOnly = TRUE); "
             "file <- args[[1]]; "
             "engine <- args[[2]]; "
@@ -375,11 +419,15 @@ class LaTeXCompiler:
             full_log = log_path.read_text(encoding="utf-8", errors="replace")
             diagnostic_log = combined_log + "\n" + engine_log
             if process.returncode != 0:
+                error_detail = self._compile_error_detail(
+                    diagnostic_log,
+                    driver="r_tinytex",
+                )
                 return (
                     False,
                     full_log,
                     f"R tinytex exited with code {process.returncode}. "
-                    f"{self._extract_error(diagnostic_log)}",
+                    f"{error_detail}",
                     process.returncode,
                 )
             return True, full_log, None, process.returncode
@@ -506,7 +554,7 @@ class LaTeXCompiler:
                 category = (
                     "success"
                     if success and has_healthy_pdf
-                    else self._classify_compile_log(log_content, error)
+                    else self._classify_compile_log(attempt_log, error)
                 )
                 if has_healthy_pdf and not success:
                     category = "success_with_wrapper_warning"
@@ -522,6 +570,8 @@ class LaTeXCompiler:
                     engine_log_path=engine_log_path if engine_log_path.exists() else None,
                     missing_file=missing_file,
                     first_error=first_error,
+                    driver="r_tinytex",
+                    driver_detail=rscript,
                 )
                 attempts.append(attempt)
 
@@ -550,6 +600,8 @@ class LaTeXCompiler:
                             attempts=attempts,
                             repaired_tex_path=candidate,
                             diagnostic_path=diagnostic_path,
+                            driver="r_tinytex",
+                            driver_detail=rscript,
                         )
                     last_error = "Generated PDF failed integrity check after copy."
                 elif success:
@@ -581,6 +633,8 @@ class LaTeXCompiler:
             error_message=last_error or "R tinytex compilation failed.",
             attempts=attempts,
             diagnostic_path=diagnostic_path,
+            driver="r_tinytex",
+            driver_detail=rscript,
         )
 
     def compile_file(
@@ -669,6 +723,8 @@ class LaTeXCompiler:
                 error_message=message,
                 attempts=attempts,
                 diagnostic_path=diagnostic_path,
+                driver="r_tinytex",
+                driver_detail=driver_detail,
             )
         if compile_driver == "r_tinytex":
             self._append_compile_log(
@@ -749,6 +805,7 @@ class LaTeXCompiler:
                     f"{tex_file.stem}.{engine}.round{round_index + 1}.tex"
                 )
                 candidate.write_text(engine_source, encoding="utf-8")
+                engine_log_path = build_path / f"{candidate.stem}.log"
                 cmd = self._build_compile_file_command(
                     engine=engine,
                     candidate=candidate,
@@ -766,30 +823,47 @@ class LaTeXCompiler:
                     cmd,
                     cwd=tex_file.parent,
                     log_path=log_path,
+                    engine_log_path=engine_log_path,
                     env=env,
                 )
                 last_log = log_content
                 last_error = error
-                attempt = CompileAttempt(
-                    engine=engine,
-                    command=cmd,
-                    tex_path=candidate,
-                    success=success,
-                    returncode=returncode,
-                    error=error,
-                    category="success"
-                    if success
-                    else self._classify_compile_log(log_content, error),
-                    repairs=list(applied_repairs),
-                )
-                attempts.append(attempt)
-
+                attempt_log = self._read_engine_log(engine_log_path) or log_content
+                missing_file = self._extract_missing_latex_file(attempt_log)
+                first_error = self._extract_error(attempt_log)
                 built_pdf = self._find_built_pdf(
                     build_path,
                     candidate_stem=candidate.stem,
                     tex_stem=tex_file.stem,
                 )
-                if success and built_pdf and self._is_pdf_healthy(built_pdf):
+                has_healthy_pdf = bool(
+                    built_pdf and self._is_pdf_healthy(built_pdf)
+                )
+                category = (
+                    "success"
+                    if success and has_healthy_pdf
+                    else self._classify_compile_log(attempt_log, error)
+                )
+                if has_healthy_pdf and not success:
+                    category = "success_with_latexmk_warning"
+                attempt = CompileAttempt(
+                    engine=engine,
+                    command=cmd,
+                    tex_path=candidate,
+                    success=success or has_healthy_pdf,
+                    returncode=returncode,
+                    error=error,
+                    category=category,
+                    repairs=list(applied_repairs),
+                    engine_log_path=engine_log_path if engine_log_path.exists() else None,
+                    missing_file=missing_file,
+                    first_error=first_error,
+                    driver=command_mode,
+                    driver_detail=driver_detail or "configured",
+                )
+                attempts.append(attempt)
+
+                if has_healthy_pdf and built_pdf:
                     shutil.copy2(built_pdf, output_path)
                     if self._is_pdf_healthy(output_path):
                         successful_source = engine_source
@@ -809,6 +883,14 @@ class LaTeXCompiler:
                             attempts=attempts,
                             repaired_tex_path=successful_candidate,
                             diagnostic_path=diagnostic_path,
+                            warning_message=(
+                                "latexmk returned a non-zero exit code, "
+                                "but a healthy PDF was produced and copied."
+                                if not success
+                                else None
+                            ),
+                            driver=command_mode,
+                            driver_detail=driver_detail or "configured",
                         )
                     last_error = "Generated PDF failed integrity check after copy."
 
@@ -818,7 +900,7 @@ class LaTeXCompiler:
                 patched_source, fallback_reason, changed = (
                     self._apply_compile_file_log_fallbacks(
                         engine_source,
-                        log_content,
+                        attempt_log,
                         build_path,
                     )
                 )
@@ -841,6 +923,8 @@ class LaTeXCompiler:
             error_message=last_error or "Compilation failed.",
             attempts=attempts,
             diagnostic_path=diagnostic_path,
+            driver=command_mode if "command_mode" in locals() else compile_driver,
+            driver_detail=driver_detail or "configured",
         )
 
     def compile(
@@ -1072,13 +1156,90 @@ class LaTeXCompiler:
             except Exception:
                 return "", False
 
+        original_source = self._repair_repeated_translated_preamble(
+            tex_file,
+            original_source,
+        )
         normalized = normalize_unicode_engine_source(original_source)
         rewritten, bbl_aliases = self._rewrite_bibliography_to_precompiled_bbl(
             normalized,
             tex_file,
         )
         self._copy_bbl_aliases(tex_file, build_path, bbl_aliases)
+        self._copy_build_local_inputs(tex_file, build_path)
         return rewritten, bool(bbl_aliases)
+
+    @staticmethod
+    def _repair_repeated_translated_preamble(tex_file: Path, source: str) -> str:
+        """Recover from translation outputs that duplicate local preamble content."""
+        begin_match = re.search(r"\\begin\{document\}", source)
+        if not begin_match:
+            return source
+
+        preamble = source[: begin_match.start()]
+        if not LaTeXCompiler._looks_like_repeated_translated_preamble(preamble):
+            return source
+
+        sibling_candidates: List[Path] = []
+        if tex_file.name == "main_zh.tex":
+            sibling_candidates.append(tex_file.with_name("main.tex"))
+        if tex_file.stem.endswith("_zh"):
+            sibling_candidates.append(tex_file.with_name(f"{tex_file.stem[:-3]}.tex"))
+
+        for sibling in dict.fromkeys(sibling_candidates):
+            if sibling == tex_file or not sibling.exists():
+                continue
+            try:
+                sibling_source = sibling.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            sibling_begin = re.search(r"\\begin\{document\}", sibling_source)
+            if not sibling_begin:
+                continue
+            sibling_preamble = sibling_source[: sibling_begin.start()]
+            if len(sibling_preamble) >= len(preamble) / 2:
+                continue
+            return sibling_preamble.rstrip() + "\n\n" + source[begin_match.start() :]
+
+        return source
+
+    @staticmethod
+    def _looks_like_repeated_translated_preamble(preamble: str) -> bool:
+        preamble_lines = preamble.count("\n") + 1
+        if len(preamble) < 120_000 and preamble_lines < 2_000:
+            return False
+
+        repeated_markers = (
+            preamble.count(r"\newcommand{\red}")
+            + preamble.count(r"\newcommand{\todo}")
+            + preamble.count(r"\newcommand{\greencircle}")
+            + preamble.count("之后即可")
+        )
+        return repeated_markers >= 20
+
+    def _copy_build_local_inputs(self, tex_file: Path, build_path: Path) -> None:
+        """Copy mutable local TeX support files to build/ for compile fallbacks."""
+        source_dir = tex_file.parent
+        if not source_dir.exists():
+            return
+        build_path.mkdir(parents=True, exist_ok=True)
+        for path in source_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in {".cls", ".sty", ".def"}:
+                continue
+            try:
+                if build_path in path.resolve().parents:
+                    continue
+                relative = path.relative_to(source_dir)
+            except Exception:
+                continue
+            target = build_path / relative
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target)
+            except Exception:
+                continue
 
     def _prepare_compile_inputs(self, tex_file: Path, build_path: Path) -> bool:
         """Normalize TeX source and align precompiled bibliography artifacts."""
@@ -1169,6 +1330,7 @@ class LaTeXCompiler:
         *,
         cwd: Path,
         log_path: Path,
+        engine_log_path: Optional[Path] = None,
         env: Optional[Dict[str, str]] = None,
     ) -> Tuple[bool, str, Optional[str], Optional[int]]:
         header = f"$ {' '.join(cmd)}\n"
@@ -1186,16 +1348,32 @@ class LaTeXCompiler:
                 env=env or self._build_env(),
             )
             combined_log = process.stdout + "\n" + process.stderr
+            engine_log = (
+                self._read_engine_log(engine_log_path) if engine_log_path else ""
+            )
             with log_path.open("a", encoding="utf-8") as log_file:
                 log_file.write(combined_log)
                 log_file.write("\n")
+                if engine_log and engine_log_path:
+                    log_file.write(
+                        "\n"
+                        f"===== TeX engine log: {engine_log_path} =====\n"
+                    )
+                    log_file.write(engine_log)
+                    if not engine_log.endswith("\n"):
+                        log_file.write("\n")
             full_log = log_path.read_text(encoding="utf-8", errors="replace")
+            diagnostic_log = combined_log + "\n" + engine_log
             if process.returncode != 0:
+                error_detail = self._compile_error_detail(
+                    diagnostic_log,
+                    driver="latexmk",
+                )
                 return (
                     False,
                     full_log,
                     f"Compilation command exited with code {process.returncode}. "
-                    f"{self._extract_error(combined_log)}",
+                    f"{error_detail}",
                     process.returncode,
                 )
             return True, full_log, None, process.returncode
@@ -1304,6 +1482,32 @@ class LaTeXCompiler:
             if changed:
                 return patched, reason, True
 
+        if self._has_microtype_disable_ligatures_error(log_content):
+            patched, reason, changed = self._apply_microtype_disable_ligatures_fallback(
+                latex_source,
+                workspace_dir=workspace_dir,
+            )
+            if changed:
+                return patched, reason, True
+
+        redefined_commands = self._extract_redefined_commands(log_content)
+        if redefined_commands:
+            patched, reason, changed = self._apply_redefined_command_fallback(
+                latex_source,
+                redefined_commands,
+                workspace_dir=workspace_dir,
+            )
+            if changed:
+                return patched, reason, True
+
+        if self._has_noopndent_error(log_content):
+            patched, reason, changed = self._apply_noopndent_fallback(
+                latex_source,
+                workspace_dir=workspace_dir,
+            )
+            if changed:
+                return patched, reason, True
+
         return latex_source, "no_fallback", False
 
     @staticmethod
@@ -1381,7 +1585,10 @@ class LaTeXCompiler:
             lowered,
         ):
             return "shell_escape"
-        if "fontspec" in lowered:
+        if re.search(
+            r"(?:package\s+fontspec\s+error|fontspec\s+error|the font\s+\"[^\"]+\"\s+cannot\s+be)",
+            lowered,
+        ):
             return "fontspec"
         if re.search(r"file\s+[`'][^`']+[`']\s+not\s+found", lowered):
             return "missing_file"
@@ -1413,6 +1620,8 @@ class LaTeXCompiler:
             ),
             "missing_file": attempt.missing_file,
             "first_error": attempt.first_error,
+            "driver": attempt.driver,
+            "driver_detail": attempt.driver_detail,
         }
 
     def _write_compile_attempts(
@@ -1780,6 +1989,15 @@ class LaTeXCompiler:
         )
 
     @staticmethod
+    def _has_microtype_disable_ligatures_error(log: str) -> bool:
+        lowered = (log or "").lower().replace("\r", "\n")
+        return bool(
+            re.search(r"package\s+microtype\s+error", lowered)
+            and "disabling ligatures" in lowered
+            and "only possible" in lowered
+        )
+
+    @staticmethod
     def _rewrite_microtype_tracking(text: str) -> Tuple[str, bool]:
         pattern = re.compile(
             r"\\(?P<cmd>RequirePackage|usepackage)\[(?P<opts>[^\]]*)\]\{microtype\}"
@@ -1812,6 +2030,16 @@ class LaTeXCompiler:
         patched = pattern.sub(_replace, text)
         return patched, changed
 
+    @staticmethod
+    def _rewrite_microtype_disable_ligatures(text: str) -> Tuple[str, bool]:
+        patched = re.sub(
+            r"^[ \t]*\\DisableLigatures(?:\[[^\]]*\])?\{[^}]*\}[ \t]*\n?",
+            "",
+            text,
+            flags=re.MULTILINE,
+        )
+        return patched, patched != text
+
     def _patch_workspace_text_files(
         self,
         workspace_dir: Path,
@@ -1823,7 +2051,7 @@ class LaTeXCompiler:
         for path in workspace_dir.rglob("*"):
             if not path.is_file():
                 continue
-            if path.suffix.lower() not in {".tex", ".cls", ".sty"}:
+            if path.suffix.lower() not in {".tex", ".cls", ".sty", ".def"}:
                 continue
             if skip_main_tex and path.name == "main.tex":
                 continue
@@ -1854,6 +2082,121 @@ class LaTeXCompiler:
         changed = source_changed or workspace_changed
         if changed:
             return patched_source, "fallback_disable_microtype_tracking", True
+        return latex_source, "no_fallback", False
+
+    def _apply_microtype_disable_ligatures_fallback(
+        self,
+        latex_source: str,
+        workspace_dir: Optional[Path] = None,
+    ) -> Tuple[str, str, bool]:
+        patched_source, source_changed = self._rewrite_microtype_disable_ligatures(
+            latex_source
+        )
+        workspace_changed = False
+        if workspace_dir and workspace_dir.exists():
+            workspace_changed = self._patch_workspace_text_files(
+                workspace_dir,
+                self._rewrite_microtype_disable_ligatures,
+                skip_main_tex=True,
+            )
+        changed = source_changed or workspace_changed
+        if changed:
+            return patched_source, "fallback_disable_microtype_ligatures", True
+        return latex_source, "no_fallback", False
+
+    @staticmethod
+    def _extract_redefined_commands(log: str) -> List[str]:
+        if not log:
+            return []
+        commands: List[str] = []
+        normalized = re.sub(r"defi\s+ned", "defined", log, flags=re.IGNORECASE)
+        for match in re.finditer(
+            r"LaTeX Error:\s+Command\s+\\([A-Za-z@]+)\s+already defined",
+            normalized,
+            flags=re.IGNORECASE,
+        ):
+            command = match.group(1)
+            if command in SAFE_REDEFINED_COMMANDS and command not in commands:
+                commands.append(command)
+        return commands
+
+    @staticmethod
+    def _has_noopndent_error(log: str) -> bool:
+        lowered = (log or "").lower()
+        return "undefined control sequence" in lowered and "\\noopndent" in lowered
+
+    @staticmethod
+    def _rewrite_noopndent(text: str) -> Tuple[str, bool]:
+        patched = text.replace("\\noopndent", "\\noindent")
+        return patched, patched != text
+
+    def _apply_noopndent_fallback(
+        self,
+        latex_source: str,
+        workspace_dir: Optional[Path] = None,
+    ) -> Tuple[str, str, bool]:
+        patched_source, source_changed = self._rewrite_noopndent(latex_source)
+        workspace_changed = False
+        if workspace_dir and workspace_dir.exists():
+            workspace_changed = self._patch_workspace_text_files(
+                workspace_dir,
+                self._rewrite_noopndent,
+                skip_main_tex=True,
+            )
+        changed = source_changed or workspace_changed
+        if changed:
+            return patched_source, "fallback_fix_noopndent", True
+        return latex_source, "no_fallback", False
+
+    @staticmethod
+    def _rewrite_redefined_newcommands(
+        text: str,
+        commands: List[str],
+    ) -> Tuple[str, bool]:
+        if not commands:
+            return text, False
+
+        changed = False
+        patched = text
+        commands_to_patch = list(dict.fromkeys([*commands, *SAFE_REDEFINED_COMMANDS]))
+        for command in commands_to_patch:
+            pattern = re.compile(
+                rf"\\newcommand\s*(?P<star>\*)?\s*"
+                rf"(?P<braced>\{{\\{re.escape(command)}\}}|\\{re.escape(command)})",
+            )
+
+            def replace(match: re.Match[str]) -> str:
+                nonlocal changed
+                changed = True
+                return (
+                    "\\providecommand"
+                    + (match.group("star") or "")
+                    + match.group("braced")
+                )
+
+            patched = pattern.sub(replace, patched)
+        return patched, changed
+
+    def _apply_redefined_command_fallback(
+        self,
+        latex_source: str,
+        commands: List[str],
+        workspace_dir: Optional[Path] = None,
+    ) -> Tuple[str, str, bool]:
+        def rewriter(text: str) -> Tuple[str, bool]:
+            return self._rewrite_redefined_newcommands(text, commands)
+
+        patched_source, source_changed = rewriter(latex_source)
+        workspace_changed = False
+        if workspace_dir and workspace_dir.exists():
+            workspace_changed = self._patch_workspace_text_files(
+                workspace_dir,
+                rewriter,
+                skip_main_tex=True,
+            )
+        changed = source_changed or workspace_changed
+        if changed:
+            return patched_source, "fallback_provide_redefined_commands", True
         return latex_source, "no_fallback", False
 
     def _run_bibliography_tool(
@@ -1981,6 +2324,25 @@ class LaTeXCompiler:
             return "Fatal error detected in logs"
 
         return "Unknown error (check full logs)"
+
+    def _compile_error_detail(self, log: str, *, driver: str) -> str:
+        detail = self._extract_error(log)
+        missing_file = self._extract_missing_latex_file(log)
+        if not missing_file:
+            return detail
+
+        if driver == "r_tinytex":
+            hint = (
+                "官方 R tinytex 自动补包未完成；请检查 TinyTeX/tlmgr "
+                "repository、网络或代理后重试。"
+            )
+        else:
+            hint = (
+                "当前使用 latexmk driver，不会自动安装缺失 TeX 包；"
+                "推荐使用 tinytex_driver: r_tinytex，或手动通过 TinyTeX/tlmgr "
+                "安装缺失包后重试。"
+            )
+        return f"{detail}\nMissing TeX file: {missing_file}. {hint}"
 
     @staticmethod
     def _classify_error_text(error_text: str) -> str:

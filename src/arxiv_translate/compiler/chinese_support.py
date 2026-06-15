@@ -15,6 +15,7 @@ ENGINE_CONFLICT_PRIMITIVES = (
     "pdfcompresslevel",
     "pdfobjcompresslevel",
     "pdfmapline",
+    "pdfoptionpdfminorversion",
 )
 ENGINE_CONFLICT_BRACED_COMMANDS = ("pdfinfo",)
 _ENGINE_CONFLICT_PATTERN = re.compile(
@@ -475,17 +476,42 @@ def _fontspec_path_option(directory: Path) -> str:
     return f"Path={{{path}}}"
 
 
+def _fontspec_local_file_options(command: str, font_path: Path) -> str:
+    options = [_fontspec_path_option(font_path.parent)]
+    if command in {"setmainjfont", "setsansjfont", "setmonojfont"}:
+        # luatexja can fail later when a template requests bold CJK text if
+        # a local font-file family has no explicit bold shape.
+        font_name = font_path.name
+        options.extend(
+            [
+                f"BoldFont={{{font_name}}}",
+                f"ItalicFont={{{font_name}}}",
+                f"BoldItalicFont={{{font_name}}}",
+            ]
+        )
+    return ",".join(options)
+
+
 def _font_command(
     command: str,
     font_value: str,
     font_dir: Optional[Union[str, Path]],
 ) -> str:
+    if not _is_font_file_value(font_value) and font_dir:
+        font_key = font_value.strip().lower()
+        for font_file in find_font_files(font_dir):
+            if font_file.stem.lower() == font_key:
+                return (
+                    f"\\{command}[{_fontspec_local_file_options(command, font_file)}]"
+                    f"{{{font_file.name}}}"
+                )
+
     if not _is_font_file_value(font_value):
         return f"\\{command}{{{font_value}}}"
 
     font_path = _resolve_font_file_value(font_value, font_dir)
     return (
-        f"\\{command}[{_fontspec_path_option(font_path.parent)}]"
+        f"\\{command}[{_fontspec_local_file_options(command, font_path)}]"
         f"{{{font_path.name}}}"
     )
 

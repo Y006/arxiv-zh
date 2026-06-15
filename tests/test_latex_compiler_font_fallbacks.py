@@ -298,6 +298,27 @@ def test_compile_file_auto_uses_r_tinytex_when_available(monkeypatch, tmp_path: 
     assert not [cmd for cmd, _kwargs in commands if cmd[0] == "latexmk"]
 
 
+def test_r_tinytex_command_supports_temporary_tlmgr_repository(tmp_path: Path):
+    cmd = LaTeXCompiler()._build_r_tinytex_command(
+        rscript="/usr/bin/Rscript",
+        engine="xelatex",
+        candidate=tmp_path / "main_zh.tex",
+        build_path=tmp_path / "build",
+        allow_shell_escape=False,
+        install_packages=True,
+    )
+
+    expression = cmd[3]
+    assert "ARXIV_ZH_TLMGR_REPOSITORY" in expression
+    assert "ARXIV_ZH_TLMGR_PROXY" in expression
+    assert "export https_proxy=" in expression
+    assert "file.path(tlmgr_wrapper_dir, 'tlmgr')" in expression
+    assert "tinytex.tlmgr.path" in expression
+    assert "--repository" in expression
+    assert "tinytex::latexmk" in expression
+    assert "install_packages = TRUE" in expression
+
+
 def test_compile_file_r_tinytex_uses_engine_log_for_error_and_attempt_metadata(
     monkeypatch,
     tmp_path: Path,
@@ -356,6 +377,65 @@ def test_compile_file_r_tinytex_uses_engine_log_for_error_and_attempt_metadata(
     assert attempts[0]["missing_file"] == "bbding.sty"
     assert attempts[0]["engine_log_path"].endswith(".log")
     assert "bbding.sty" in attempts[0]["first_error"]
+
+
+def test_r_tinytex_attempt_category_uses_current_engine_log(
+    monkeypatch,
+    tmp_path: Path,
+):
+    build_dir = tmp_path / "build"
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\\begin{document}x\\end{document}",
+        encoding="utf-8",
+    )
+
+    def fake_which(name, path=None):
+        _ = path
+        if name == "Rscript":
+            return "/usr/bin/Rscript"
+        return None
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "/usr/bin/Rscript" and "requireNamespace" in cmd[3]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[0] == "/usr/bin/Rscript":
+            candidate = Path(cmd[4])
+            engine = cmd[5]
+            output_dir = Path(cmd[6])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            engine_log = output_dir / f"{candidate.stem}.log"
+            if engine == "xelatex":
+                engine_log.write_text(
+                    'Package fontspec Error: The font "STSONG" cannot be found.\n',
+                    encoding="utf-8",
+                )
+                return SimpleNamespace(returncode=1, stdout="", stderr="")
+            engine_log.write_text(
+                "Package minted Error: You must invoke LaTeX with the "
+                "-shell-escape flag.\n",
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler().compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+        max_repair_rounds=0,
+    )
+
+    categories = [attempt.category for attempt in result.attempts]
+    assert result.success is False
+    assert categories[:2] == ["fontspec", "shell_escape"]
 
 
 def test_compile_file_r_tinytex_applies_log_fallback_and_retries(
@@ -641,6 +721,119 @@ def test_compile_file_auto_falls_back_to_latexmk_when_r_tinytex_missing(
     assert commands and commands[0][0] == "latexmk"
 
 
+def test_compile_file_latexmk_uses_engine_log_for_missing_file_metadata(
+    monkeypatch,
+    tmp_path: Path,
+):
+    build_dir = tmp_path / "build"
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\\begin{document}x\\end{document}",
+        encoding="utf-8",
+    )
+
+    def fake_which(name, path=None):
+        _ = path
+        if name == "latexmk":
+            return "/tinytex/bin/latexmk"
+        return None
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "latexmk":
+            candidate = Path(cmd[-1])
+            build_dir.mkdir(parents=True, exist_ok=True)
+            (build_dir / f"{candidate.stem}.log").write_text(
+                "! LaTeX Error: File `bbm.sty' not found.\n"
+                "l.42 \\usepackage{bbm}\n",
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=12, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler(tinytex_driver="latexmk").compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+        max_repair_rounds=0,
+    )
+
+    attempts = json.loads(
+        (tmp_path / "logs" / "compile_attempts.json").read_text(encoding="utf-8")
+    )["attempts"]
+    compile_log = (tmp_path / "logs" / "compile.log").read_text(encoding="utf-8")
+    assert result.success is False
+    assert result.error_message is not None
+    assert "bbm.sty" in result.error_message
+    assert "Unknown error" not in result.error_message
+    assert "bbm.sty" in compile_log
+    assert attempts[0]["driver"] == "latexmk"
+    assert attempts[0]["driver_detail"] == "configured"
+    assert attempts[0]["missing_file"] == "bbm.sty"
+    assert attempts[0]["engine_log_path"].endswith(".log")
+    assert "bbm.sty" in attempts[0]["first_error"]
+
+
+def test_compile_file_latexmk_recovers_pdf_from_nonzero_exit(
+    monkeypatch,
+    tmp_path: Path,
+):
+    build_dir = tmp_path / "build"
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\\begin{document}x\\end{document}",
+        encoding="utf-8",
+    )
+
+    def fake_which(name, path=None):
+        _ = path
+        if name == "latexmk":
+            return "/tinytex/bin/latexmk"
+        return None
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "latexmk":
+            candidate = Path(cmd[-1])
+            build_dir.mkdir(parents=True, exist_ok=True)
+            (build_dir / f"{candidate.stem}.pdf").write_bytes(
+                b"%PDF-1.5\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+            )
+            (build_dir / f"{candidate.stem}.log").write_text(
+                "Output written on main_zh.pdf.\n"
+                "Latexmk: Errors, so I did not complete making targets\n",
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=12, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler(tinytex_driver="latexmk").compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+    )
+
+    attempts = json.loads(
+        (tmp_path / "logs" / "compile_attempts.json").read_text(encoding="utf-8")
+    )["attempts"]
+    assert result.success is True
+    assert result.warning_message is not None
+    assert result.pdf_path == tmp_path / "pdf" / "main_zh.pdf"
+    assert attempts[0]["category"] == "success_with_latexmk_warning"
+
+
 def test_compile_file_forced_r_tinytex_reports_missing_wrapper(
     monkeypatch,
     tmp_path: Path,
@@ -667,6 +860,159 @@ def test_compile_file_forced_r_tinytex_reports_missing_wrapper(
     assert "R tinytex driver requested but unavailable" in result.error_message
 
 
+def test_compile_file_build_local_fallback_cleans_translated_cls_pdfoutput(
+    monkeypatch,
+    tmp_path: Path,
+):
+    translated_dir = tmp_path / "translated"
+    translated_dir.mkdir()
+    build_dir = tmp_path / "build"
+    tex_file = translated_dir / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{beingbeyond}\n\\begin{document}x\\end{document}\n",
+        encoding="utf-8",
+    )
+    (translated_dir / "beingbeyond.cls").write_text(
+        "\\NeedsTeXFormat{LaTeX2e}\n"
+        "\\pdfoutput=1\n"
+        "\\LoadClass{article}\n",
+        encoding="utf-8",
+    )
+    compile_candidates = []
+
+    def fake_which(name, path=None):
+        _ = path
+        if name == "latexmk":
+            return "/tinytex/bin/latexmk"
+        return None
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "latexmk":
+            candidate = Path(cmd[-1])
+            compile_candidates.append(candidate)
+            build_dir.mkdir(parents=True, exist_ok=True)
+            copied_cls = build_dir / "beingbeyond.cls"
+            assert copied_cls.exists()
+            engine_log = build_dir / f"{candidate.stem}.log"
+            if len(compile_candidates) == 1:
+                assert "\\pdfoutput" in copied_cls.read_text(encoding="utf-8")
+                engine_log.write_text(
+                    "./beingbeyond.cls:2: Undefined control sequence.\n"
+                    "l.2 \\pdfoutput\n",
+                    encoding="utf-8",
+                )
+                return SimpleNamespace(returncode=12, stdout="", stderr="")
+            assert "\\pdfoutput" not in copied_cls.read_text(encoding="utf-8")
+            (build_dir / f"{candidate.stem}.pdf").write_bytes(
+                b"%PDF-1.5\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+            )
+            engine_log.write_text("ok", encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler(tinytex_driver="latexmk").compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+        max_repair_rounds=1,
+    )
+
+    assert result.success is True
+    assert len(compile_candidates) == 2
+    assert any(
+        "fallback_remove_pdftex_primitives" in attempt.repairs
+        for attempt in result.attempts
+    )
+    assert "\\pdfoutput" in (translated_dir / "beingbeyond.cls").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_compile_file_newcommand_conflict_uses_build_local_providecommand(
+    monkeypatch,
+    tmp_path: Path,
+):
+    build_dir = tmp_path / "build"
+    tex_file = tmp_path / "main_zh.tex"
+    tex_file.write_text(
+        "\\documentclass{article}\n"
+        "\\newcommand{\\red}[1]{#1}\n"
+        "\\newcommand{\\todo}[1]{#1}\n"
+        "\\newcommand{\\red}[1]{#1}\n"
+        "\\newcommand{\\todo}[1]{#1}\n"
+        "\\newcommand{\\greencircle}{%\n"
+        "  x%\n"
+        "}\n"
+        "\\newcommand{\\greencircle}{%\n"
+        "  x%\n"
+        "}\n"
+        "\\begin{document}x\\end{document}\n",
+        encoding="utf-8",
+    )
+    compile_candidates = []
+
+    def fake_which(name, path=None):
+        _ = path
+        if name == "latexmk":
+            return "/tinytex/bin/latexmk"
+        return None
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "latexmk":
+            candidate = Path(cmd[-1])
+            compile_candidates.append(candidate)
+            engine_log = build_dir / f"{candidate.stem}.log"
+            build_dir.mkdir(parents=True, exist_ok=True)
+            if len(compile_candidates) == 1:
+                assert "\\newcommand{\\red}" in candidate.read_text(encoding="utf-8")
+                engine_log.write_text(
+                    f"{candidate}:2: LaTeX Error: Command \\red already defi\n"
+                    "ned.\n",
+                    encoding="utf-8",
+                )
+                return SimpleNamespace(returncode=12, stdout="", stderr="")
+            candidate_text = candidate.read_text(encoding="utf-8")
+            assert "\\providecommand{\\red}" in candidate_text
+            assert "\\providecommand{\\todo}" in candidate_text
+            assert "\\providecommand{\\greencircle}" in candidate_text
+            assert "\\newcommand{\\red}" not in candidate_text
+            assert "\\newcommand{\\todo}" not in candidate_text
+            assert "\\newcommand{\\greencircle}" not in candidate_text
+            (build_dir / f"{candidate.stem}.pdf").write_bytes(
+                b"%PDF-1.5\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+            )
+            engine_log.write_text("ok", encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(
+        "arxiv_translate.compiler.latex_compiler.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = LaTeXCompiler(tinytex_driver="latexmk").compile_file(
+        tex_file=tex_file,
+        output_path=tmp_path / "pdf" / "main_zh.pdf",
+        logs_dir=tmp_path / "logs",
+        build_dir=build_dir,
+        max_repair_rounds=1,
+    )
+
+    assert result.success is True
+    assert any(
+        "fallback_provide_redefined_commands" in attempt.repairs
+        for attempt in result.attempts
+    )
+
+
 def test_prepare_compile_inputs_sanitizes_unicode_engine_conflicts(tmp_path: Path):
     tex_file = tmp_path / "main_zh.tex"
     tex_file.write_text(
@@ -689,6 +1035,46 @@ def test_prepare_compile_inputs_sanitizes_unicode_engine_conflicts(tmp_path: Pat
     assert "\\usepackage{graphicx}" in patched
     assert "\\ModelSymbol{}架构" in patched
     assert "\\ModelSymbol{}模型" in patched
+
+
+def test_prepare_compile_source_repairs_repeated_translated_preamble(tmp_path: Path):
+    build_dir = tmp_path / "build"
+    source_main = tmp_path / "main.tex"
+    tex_file = tmp_path / "main_zh.tex"
+    clean_preamble = (
+        "\\documentclass{article}\n"
+        "\\input{preamble}\n"
+        "\\title{Clean title}\n"
+    )
+    source_main.write_text(
+        clean_preamble + "\\begin{document}\nOriginal body\n\\end{document}\n",
+        encoding="utf-8",
+    )
+    repeated_chunk = (
+        "\\newcommand{\\red}[1]{#1}\n"
+        "\\newcommand{\\todo}[1]{#1}\n"
+        "\\newcommand{\\greencircle}{x}\n"
+        "\\makeatletter\n"
+        "\\makeatother\n"
+        " 之后即可\n"
+    )
+    tex_file.write_text(
+        "\\documentclass{article}\n"
+        + repeated_chunk * 600
+        + "\\begin{document}\n中文正文\n\\end{document}\n",
+        encoding="utf-8",
+    )
+
+    prepared, uses_bbl = LaTeXCompiler()._prepare_compile_source(
+        tex_file,
+        build_dir,
+    )
+
+    assert uses_bbl is False
+    assert prepared.startswith(clean_preamble)
+    assert "\\begin{document}\n中文正文" in prepared
+    assert "之后即可" not in prepared
+    assert prepared.count("\\newcommand{\\red}") == 0
 
 
 def test_prepare_compile_inputs_aliases_precompiled_bbl_to_tex_stem(tmp_path: Path):
@@ -881,6 +1267,18 @@ def test_restricted_write18_success_log_is_not_shell_escape_required():
     assert category == "unknown"
 
 
+def test_classify_latex_error_is_not_confused_by_loaded_fontspec_package():
+    compiler = LaTeXCompiler()
+    log = (
+        "(/usr/local/texlive/texmf-dist/tex/latex/fontspec/fontspec.sty)\n"
+        "main.tex:67: LaTeX Error: Command \\red already defined.\n"
+    )
+
+    category = compiler._classify_compile_log(log, None)
+
+    assert category == "latex"
+
+
 def test_apply_missing_file_fallback_sets_bxcoloremoji_names_false(tmp_path: Path):
     compiler = LaTeXCompiler()
     source = r"""
@@ -938,6 +1336,26 @@ text
     assert "tracking=smallcaps" not in workspace_text
 
 
+def test_apply_microtype_disable_ligatures_fallback_patches_workspace(tmp_path: Path):
+    compiler = LaTeXCompiler()
+    source = "\\documentclass{article}\\begin{document}x\\end{document}"
+    workspace_file = tmp_path / "beingbeyond.cls"
+    workspace_file.write_text(
+        "\\RequirePackage{microtype}\n\\DisableLigatures[f]{family=sf*}\n",
+        encoding="utf-8",
+    )
+
+    patched, reason, changed = compiler._apply_microtype_disable_ligatures_fallback(
+        source,
+        workspace_dir=tmp_path,
+    )
+
+    assert patched == source
+    assert changed is True
+    assert reason == "fallback_disable_microtype_ligatures"
+    assert "\\DisableLigatures" not in workspace_file.read_text(encoding="utf-8")
+
+
 def test_has_microtype_tracking_error_handles_wrapped_pdftex_word():
     compiler = LaTeXCompiler()
     log = (
@@ -946,6 +1364,33 @@ def test_has_microtype_tracking_error_handles_wrapped_pdftex_word():
         "(microtype)                dftex 1.40\n"
     )
     assert compiler._has_microtype_tracking_error(log) is True
+
+
+def test_has_microtype_disable_ligatures_error():
+    compiler = LaTeXCompiler()
+    log = (
+        "Package microtype Error: Disabling ligatures of a font is only possible\n"
+        "(microtype)                with pdftex version 1.30 or newer.\n"
+    )
+
+    assert compiler._has_microtype_disable_ligatures_error(log) is True
+
+
+def test_apply_noopndent_fallback_patches_source_and_workspace(tmp_path: Path):
+    compiler = LaTeXCompiler()
+    source = "\\noopndent text\n"
+    workspace_file = tmp_path / "main_zh.tex"
+    workspace_file.write_text("\\noopndent other\n", encoding="utf-8")
+
+    patched, reason, changed = compiler._apply_noopndent_fallback(
+        source,
+        workspace_dir=tmp_path,
+    )
+
+    assert changed is True
+    assert reason == "fallback_fix_noopndent"
+    assert patched == "\\noindent text\n"
+    assert workspace_file.read_text(encoding="utf-8") == "\\noindent other\n"
 
 
 def test_extract_error_detects_package_error_without_bang():
